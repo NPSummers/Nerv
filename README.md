@@ -9,6 +9,8 @@
 > [!IMPORTANT]
 > Nerv is in early alpha and still in development; breaking bugs and missing features should be expected.
 
+A basic showcase is in the [**Showcase**](./examples/showcase.nerv) file.
+
 ## Contributing
 
 Contributions are welcome, but please make sure you clarify with me before submitting a pull request. You can contact me via my discord `_nonnewport_`.

@@ -32,6 +32,8 @@ impl<'a> Parser<'a> {
             Some(Token::If) => self.parse_if_statement(),
             Some(Token::While) => self.parse_while_statement(),
             Some(Token::Print) => self.parse_print_statement(),
+            Some(Token::Import) => self.parse_import_statement(),
+            Some(Token::From) => self.parse_from_import_statement(),
             _ => {
                 let expr = self.parse_expression(0)?;
                 self.consume(Token::Semicolon)?;
@@ -45,6 +47,20 @@ impl<'a> Parser<'a> {
         let mut left = self.parse_prefix()?;
 
         while precedence < self.get_peek_precedence() {
+            // Check for assignment first (special case)
+            if matches!(self.peek(), Some(Token::Assign)) {
+                if let Expr::Identifier(name) = left {
+                    self.next(); // Consume '='
+                    let value = self.parse_expression(0)?; // Right-associative, low precedence
+                    return Ok(Expr::Assignment(AssignmentExpr {
+                        target: name,
+                        value: Box::new(value),
+                    }));
+                } else {
+                    return Err("Invalid assignment target".to_string());
+                }
+            }
+            
             let op = self.get_binary_op()?;
             let op_precedence = self.get_op_precedence(&op);
             self.next(); // Consume operator
@@ -144,32 +160,33 @@ impl<'a> Parser<'a> {
 
     fn get_op_precedence_from_token(token: &Token) -> u8 {
         match token {
-            Token::Or => 1,
-            Token::And => 2,
-            Token::BitwiseOr => 3,
-            Token::BitwiseXor => 4,
-            Token::BitwiseAnd => 5,
-            Token::Equal | Token::NotEqual => 6,
-            Token::LessThan | Token::GreaterThan | Token::LessThanOrEqual | Token::GreaterThanOrEqual => 7,
-            Token::LeftShift | Token::RightShift => 8,
-            Token::Plus | Token::Minus => 9,
-            Token::Star | Token::Slash | Token::Percent => 10,
+            Token::Assign => 1,  // Assignment has very low precedence
+            Token::Or => 2,
+            Token::And => 3,
+            Token::BitwiseOr => 4,
+            Token::BitwiseXor => 5,
+            Token::BitwiseAnd => 6,
+            Token::Equal | Token::NotEqual => 7,
+            Token::LessThan | Token::GreaterThan | Token::LessThanOrEqual | Token::GreaterThanOrEqual => 8,
+            Token::LeftShift | Token::RightShift => 9,
+            Token::Plus | Token::Minus => 10,
+            Token::Star | Token::Slash | Token::Percent => 11,
             _ => 0,
         }
     }
     
     fn get_op_precedence(&self, op: &BinaryOp) -> u8 {
         match op {
-            BinaryOp::Or => 1,
-            BinaryOp::And => 2,
-            BinaryOp::BitwiseOr => 3,
-            BinaryOp::BitwiseXor => 4,
-            BinaryOp::BitwiseAnd => 5,
-            BinaryOp::Equal | BinaryOp::NotEqual => 6,
-            BinaryOp::LessThan | BinaryOp::GreaterThan | BinaryOp::LessThanOrEqual | BinaryOp::GreaterThanOrEqual => 7,
-            BinaryOp::LeftShift | BinaryOp::RightShift => 8,
-            BinaryOp::Add | BinaryOp::Subtract => 9,
-            BinaryOp::Multiply | BinaryOp::Divide | BinaryOp::Modulo => 10,
+            BinaryOp::Or => 2,
+            BinaryOp::And => 3,
+            BinaryOp::BitwiseOr => 4,
+            BinaryOp::BitwiseXor => 5,
+            BinaryOp::BitwiseAnd => 6,
+            BinaryOp::Equal | BinaryOp::NotEqual => 7,
+            BinaryOp::LessThan | BinaryOp::GreaterThan | BinaryOp::LessThanOrEqual | BinaryOp::GreaterThanOrEqual => 8,
+            BinaryOp::LeftShift | BinaryOp::RightShift => 9,
+            BinaryOp::Add | BinaryOp::Subtract => 10,
+            BinaryOp::Multiply | BinaryOp::Divide | BinaryOp::Modulo => 11,
         }
     }
 
@@ -257,7 +274,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_array_literal(&mut self) -> Result<Expr, String> {
-        self.consume(Token::LBracket)?;
+        // LBracket is already consumed by the caller
         
         let mut elements = Vec::new();
         
@@ -279,7 +296,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_dict_literal(&mut self) -> Result<Expr, String> {
-        self.consume(Token::LBrace)?;
+        // LBrace is already consumed by the caller
         
         let mut pairs = Vec::new();
         
@@ -454,6 +471,45 @@ impl<'a> Parser<'a> {
         self.consume(Token::RParen)?;
         self.consume(Token::Semicolon)?;
         Ok(Stmt::Print(expr))
+    }
+
+    fn parse_import_statement(&mut self) -> Result<Stmt, String> {
+        self.consume(Token::Import)?;
+        let module = if let Some(Token::Identifier(name)) = self.next() {
+            name
+        } else {
+            return Err("Expected module name after 'import'".to_string());
+        };
+        self.consume(Token::Semicolon)?;
+        Ok(Stmt::Import(ImportStmt { module, items: None }))
+    }
+
+    fn parse_from_import_statement(&mut self) -> Result<Stmt, String> {
+        self.consume(Token::From)?;
+        let module = if let Some(Token::Identifier(name)) = self.next() {
+            name
+        } else {
+            return Err("Expected module name after 'from'".to_string());
+        };
+        self.consume(Token::Import)?;
+        
+        let mut items = Vec::new();
+        loop {
+            if let Some(Token::Identifier(name)) = self.next() {
+                items.push(name);
+            } else {
+                return Err("Expected identifier in import list".to_string());
+            }
+            
+            if matches!(self.peek(), Some(Token::Comma)) {
+                self.consume(Token::Comma)?;
+            } else {
+                break;
+            }
+        }
+        
+        self.consume(Token::Semicolon)?;
+        Ok(Stmt::Import(ImportStmt { module, items: Some(items) }))
     }
 }
 

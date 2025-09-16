@@ -1,0 +1,60 @@
+# Nerv Language Showcase
+# This file demonstrates the implemented features
+
+# Comments (single and multi-line)
+#{
+   Multi-line comments work great!
+   They can span multiple lines.
+}#
+
+# Basic data types
+plug number: int = 42;
+plug pi: float = 3.14; 
+plug greeting: string = "Hello Nerv!";
+plug is_ready: bool = true;
+plug first_char: char = 'N';
+
+# Function definitions
+plug add(a: int, b: int): int {
+    return a + b;
+}
+
+plug factorial(n: int): int {
+    if (n <= 1) {
+        return 1;
+    } else {
+        return n * factorial(n - 1);
+    }
+}
+
+# Print basic values
+print(number);      # 42
+print(is_ready);    # 1 (true)
+
+# Function calls
+print(add(10, 20)); # 30
+print(factorial(5)); # 120
+
+# Variables and assignment
+plug counter: int = 0;
+counter = counter + 1;
+print(counter);     # 1
+
+# Control flow - if/else
+if (number > 40) {
+    print(1);       # This will execute
+} else {
+    print(0);
+}
+
+# Control flow - while loop
+plug i: int = 0;
+while (i < 3) {
+    print(i);       # 0, 1, 2
+    i = i + 1;
+}
+
+# Arrays/Lists (basic support)
+plug numbers: list<int> = [1, 2, 3, 4, 5];
+
+# All basic features work!

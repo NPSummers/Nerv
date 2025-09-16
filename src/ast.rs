@@ -15,6 +15,7 @@ pub enum Stmt {
     If(IfStmt),
     While(WhileStmt),
     For(ForStmt),
+    Import(ImportStmt),
 }
 
 #[derive(Debug, PartialEq)]
@@ -47,8 +48,7 @@ pub enum Expr {
     Unary(UnaryExpr),
     Identifier(String),
     FunctionCall(FunctionCallExpr),
-    // Note: Index and Assignment removed for now to eliminate warnings
-    // These can be added back when implemented
+    Assignment(AssignmentExpr),
 }
 
 #[derive(Debug, PartialEq)]
@@ -137,8 +137,11 @@ pub enum Type {
 
 // Type implementation methods can be added back when needed for type checking
 
-// IndexExpr and AssignmentExpr removed to eliminate warnings
-// These can be added back when indexing and assignment are implemented
+#[derive(Debug, PartialEq)]
+pub struct AssignmentExpr {
+    pub target: String,
+    pub value: Box<Expr>,
+}
 
 #[derive(Debug, PartialEq)]
 pub struct IfStmt {
@@ -158,5 +161,11 @@ pub struct ForStmt {
     pub variable: String,
     pub iterable: Expr,
     pub body: Vec<Stmt>,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct ImportStmt {
+    pub module: String,
+    pub items: Option<Vec<String>>, // None for "import module", Some(vec) for "from module import items"
 }
 

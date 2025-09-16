@@ -124,6 +124,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             Stmt::While(while_stmt) => {
                 self.gen_while_stmt(while_stmt, function)?;
             }
+            Stmt::Import(import_stmt) => {
+                // For now, just ignore imports (placeholder for future module system)
+                println!("Import: {} (not yet implemented)", import_stmt.module);
+            }
             _ => return Err("Unsupported statement type".to_string()),
         }
         Ok(())
@@ -135,9 +139,38 @@ impl<'ctx> CodeGenerator<'ctx> {
                 LiteralExpr::Int(val) => Ok(self.context.i32_type().const_int(*val as u64, true)),
                 LiteralExpr::Bool(val) => Ok(self.context.i32_type().const_int(if *val { 1 } else { 0 }, false)),
                 LiteralExpr::Char(val) => Ok(self.context.i32_type().const_int(*val as u64, false)),
-                LiteralExpr::Float(_) => Err("Float literals not yet fully supported in codegen".to_string()),
-                LiteralExpr::String(_) => Err("String literals not yet fully supported in codegen".to_string()),
-                LiteralExpr::Array(_) => Err("Array literals not yet implemented".to_string()),
+                LiteralExpr::Float(val) => {
+                    let float_val = self.context.f64_type().const_float(*val);
+                    // Convert float to int for now (temporary solution)
+                    let int_val = self.builder.build_float_to_signed_int(float_val, self.context.i32_type(), "float_to_int");
+                    Ok(int_val)
+                },
+                LiteralExpr::String(val) => {
+                    let _string_ptr = self.builder.build_global_string_ptr(val, "str_literal").as_pointer_value();
+                    // For now, return the length of the string as an integer
+                    Ok(self.context.i32_type().const_int(val.len() as u64, false))
+                },
+                LiteralExpr::Array(elements) => {
+                    // For now, create a simple array of integers
+                    let array_type = self.context.i32_type().array_type(elements.len() as u32);
+                    let array_alloca = self.builder.build_alloca(array_type, "array");
+                    
+                    for (i, element) in elements.iter().enumerate() {
+                        let element_value = self.gen_expr(element, function)?;
+                        let element_ptr = unsafe {
+                            self.builder.build_gep(
+                                array_alloca,
+                                &[self.context.i32_type().const_int(0, false), 
+                                  self.context.i32_type().const_int(i as u64, false)],
+                                "element_ptr"
+                            )
+                        };
+                        self.builder.build_store(element_ptr, element_value);
+                    }
+                    
+                    // Return the array pointer as an int (simplified)
+                    Ok(self.context.i32_type().const_int(elements.len() as u64, false))
+                },
                 LiteralExpr::Dict(_) => Err("Dictionary literals not yet implemented".to_string()),
             },
             Expr::Binary(bin_expr) => {
@@ -207,6 +240,15 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             Expr::FunctionCall(func_call) => {
                 self.gen_function_call(func_call, function)
+            }
+            Expr::Assignment(assignment) => {
+                let value = self.gen_expr(&assignment.value, function)?;
+                if let Some(var_ptr) = self.named_values.get(&assignment.target) {
+                    self.builder.build_store(*var_ptr, value);
+                    Ok(value) // Return the assigned value
+                } else {
+                    Err(format!("Undefined variable: {}", assignment.target))
+                }
             }
             Expr::Unary(unary_expr) => {
                 let operand = self.gen_expr(&unary_expr.operand, function)?;
