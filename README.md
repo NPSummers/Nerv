@@ -1,5 +1,5 @@
 <div align="center">
-    <img src="./res/nerv.png" height=300>
+    <img src="./assets/nerv.png" height=300>
     <h1>Nerv</h1>
 
 [**Quick Start**](#) | [**Contributing**](#contributing) | [**License**](#license)
