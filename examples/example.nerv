@@ -1,12 +1,54 @@
-plug fibonacci(n: int): int {
-    if (n <= 1) {
-        return n;
-    } else {
-        return fibonacci(n - 1) + fibonacci(n - 2);
+# Class fields with multiple data types
+
+class Engine {
+    plug horsepower: float;
+
+    plug Engine(horsepower: float) {
+        this.horsepower = horsepower;
     }
 }
 
-plug x: int = 10;
+class Car {
+    plug model: string;
+    plug year: int;
+    plug is_electric: bool;
+    plug rating: float;
+    plug initial: char;
+    plug engine: Engine;
+    plug tags: list<string>;
+    plug meta: dict<string, int>;
 
-print(42);
-print(fibonacci(x));
+    # Constructor: assign primitives directly; allocate complex fields inside
+    plug Car(model: string, year: int, is_electric: bool, rating: float, initial: char) {
+        this.model = model;
+        this.year = year;
+        this.is_electric = is_electric;
+        this.rating = rating;
+        this.initial = initial;
+
+        # Create nested custom object and assign
+        this.engine = Engine(220.0);
+
+        # Assign collection fields
+        this.tags = ["fast", "new"];
+        this.meta = {"visits": 3};
+    }
+
+    plug describe(): int {
+        print(this.model);
+        print(this.year);
+        print(this.is_electric);
+        print(this.rating);
+        print(this.initial);
+
+        return 0;
+    }
+}
+
+plug main(): int {
+    plug car: Car = Car("Model X", 2025, true, 4.7, 'M');
+    car.describe();
+    return 0;
+}
+
+

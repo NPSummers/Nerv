@@ -30,8 +30,8 @@ plug factorial(n: int): int {
 # Print basic values
 print(number);      # 42
 print(is_ready);    # 1 (true)
-print(greeting);
-print(first_char);
+print(greeting);    # Hello Nerv!
+print(first_char);  # N
 
 # Function calls
 print(add(10, 20)); # 30
