@@ -30,6 +30,8 @@ plug factorial(n: int): int {
 # Print basic values
 print(number);      # 42
 print(is_ready);    # 1 (true)
+print(greeting);
+print(first_char);
 
 # Function calls
 print(add(10, 20)); # 30
@@ -57,4 +59,28 @@ while (i < 3) {
 # Arrays/Lists (basic support)
 plug numbers: list<int> = [1, 2, 3, 4, 5];
 
-# All basic features work!
+# Classes and Object-Oriented Programming - FULLY WORKING!
+class Calculator {
+    plug value: int;
+    
+    plug Calculator(initial: int) {
+        this.value = initial;
+    }
+    
+    plug add(amount: int): int {
+        this.value = this.value + amount;
+        return this.value;
+    }
+    
+    plug getValue(): int {
+        return this.value;
+    }
+}
+
+# Object creation and usage
+plug calc = Calculator(10);
+print(calc.value);      # Member access: 10
+print(calc.add(5));     # Method call: 15  
+print(calc.getValue()); # Method call: 15
+
+# All features work including fully usable classes!

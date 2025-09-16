@@ -28,6 +28,7 @@ impl<'a> Parser<'a> {
                 // Look ahead to see if this is a function or variable declaration
                 self.parse_plug_statement()
             },
+            Some(Token::Class) => self.parse_class_statement(),
             Some(Token::Return) => self.parse_return_statement(),
             Some(Token::If) => self.parse_if_statement(),
             Some(Token::While) => self.parse_while_statement(),
@@ -36,6 +37,9 @@ impl<'a> Parser<'a> {
             Some(Token::From) => self.parse_from_import_statement(),
             _ => {
                 let expr = self.parse_expression(0)?;
+                if !matches!(self.peek(), Some(Token::Semicolon)) {
+                    return Err(format!("Expected semicolon after expression, found {:?}", self.peek()));
+                }
                 self.consume(Token::Semicolon)?;
                 Ok(Stmt::Expr(expr))
             }
@@ -47,17 +51,79 @@ impl<'a> Parser<'a> {
         let mut left = self.parse_prefix()?;
 
         while precedence < self.get_peek_precedence() {
-            // Check for assignment first (special case)
-            if matches!(self.peek(), Some(Token::Assign)) {
-                if let Expr::Identifier(name) = left {
-                    self.next(); // Consume '='
-                    let value = self.parse_expression(0)?; // Right-associative, low precedence
-                    return Ok(Expr::Assignment(AssignmentExpr {
-                        target: name,
-                        value: Box::new(value),
-                    }));
+            // Check for member access first (highest precedence)
+            if matches!(self.peek(), Some(Token::Dot)) {
+                self.next(); // Consume '.'
+                let member = self.consume_identifier()?;
+                
+                // Check if this is followed by parentheses (method call)
+                if matches!(self.peek(), Some(Token::LParen)) {
+                    // This is a method call
+                    self.consume(Token::LParen)?;
+                    let mut args = Vec::new();
+                    
+                    if !matches!(self.peek(), Some(Token::RParen)) {
+                        loop {
+                            args.push(self.parse_expression(0)?);
+                            
+                            if self.maybe_consume(Token::Comma) {
+                                continue;
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+                    
+                    self.consume(Token::RParen)?;
+                    
+                    // Create a special function call with object context
+                    left = Expr::FunctionCall(FunctionCallExpr {
+                        name: format!("{}::{}", "METHOD_CALL", member), // Special marker for method calls
+                        args: {
+                            let mut method_args = vec![left]; // First arg is the object
+                            method_args.extend(args);
+                            method_args
+                        },
+                    });
                 } else {
-                    return Err("Invalid assignment target".to_string());
+                    // Regular member access
+                    left = Expr::MemberAccess(MemberAccessExpr {
+                        object: Box::new(left),
+                        member,
+                    });
+                }
+                continue;
+            }
+            
+            // Check for assignment (special case)
+            if matches!(self.peek(), Some(Token::Assign)) {
+                match left {
+                    Expr::Identifier(name) => {
+                        self.next(); // Consume '='
+                        let value = self.parse_expression(0)?; // Right-associative, low precedence
+                        return Ok(Expr::Assignment(AssignmentExpr {
+                            target: name,
+                            value: Box::new(value),
+                        }));
+                    }
+                    Expr::MemberAccess(member_access) => {
+                        // Handle member assignment
+                        self.next(); // Consume '='
+                        let value = self.parse_expression(0)?;
+                        
+                        // Create a special assignment expression for member access
+                        // We'll use a function call with a special name to represent this
+                        return Ok(Expr::FunctionCall(FunctionCallExpr {
+                            name: "MEMBER_ASSIGN".to_string(),
+                            args: vec![
+                                Expr::MemberAccess(member_access.clone()),
+                                value
+                            ],
+                        }));
+                    }
+                    _ => {
+                        return Err("Invalid assignment target".to_string());
+                    }
                 }
             }
             
@@ -86,6 +152,7 @@ impl<'a> Parser<'a> {
             Token::True => Ok(Expr::Literal(LiteralExpr::Bool(true))),
             Token::False => Ok(Expr::Literal(LiteralExpr::Bool(false))),
             Token::Identifier(name) => self.parse_identifier_or_function_call(name),
+            Token::This => Ok(Expr::Identifier("this".to_string())),
             Token::Minus => {
                 let operand = self.parse_expression(4)?; // High precedence for unary minus
                 Ok(Expr::Unary(UnaryExpr {
@@ -123,9 +190,12 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_identifier_or_function_call(&mut self, name: String) -> Result<Expr, String> {
-        // Check if this is followed by a parenthesis (function call)
+        // Check if this is followed by a parenthesis (function call or object instantiation)
         if let Some(Token::LParen) = self.peek() {
-            self.parse_function_call(name)
+            // For now, we'll determine if it's a class instantiation during semantic analysis
+            // In the parser, we'll treat class instantiation as function calls
+            // and distinguish them in the codegen phase
+            self.parse_function_call_or_instantiation(name)
         } else {
             Ok(Expr::Identifier(name))
         }
@@ -154,6 +224,31 @@ impl<'a> Parser<'a> {
         Ok(Expr::FunctionCall(FunctionCallExpr { name, args }))
     }
 
+    fn parse_function_call_or_instantiation(&mut self, name: String) -> Result<Expr, String> {
+        self.consume(Token::LParen)?;
+        
+        let mut args = Vec::new();
+        
+        // Parse arguments if there are any
+        if !matches!(self.peek(), Some(Token::RParen)) {
+            loop {
+                args.push(self.parse_expression(0)?);
+                
+                if self.maybe_consume(Token::Comma) {
+                    continue;
+                } else {
+                    break;
+                }
+            }
+        }
+        
+        self.consume(Token::RParen)?;
+        
+        // For now, return as FunctionCall and we'll distinguish in codegen
+        // based on whether the name refers to a class or function
+        Ok(Expr::FunctionCall(FunctionCallExpr { name, args }))
+    }
+
     fn get_peek_precedence(&mut self) -> u8 {
         self.peek().map_or(0, Self::get_op_precedence_from_token)
     }
@@ -171,6 +266,7 @@ impl<'a> Parser<'a> {
             Token::LeftShift | Token::RightShift => 9,
             Token::Plus | Token::Minus => 10,
             Token::Star | Token::Slash | Token::Percent => 11,
+            Token::Dot => 12,  // Member access has very high precedence
             _ => 0,
         }
     }
@@ -510,6 +606,64 @@ impl<'a> Parser<'a> {
         
         self.consume(Token::Semicolon)?;
         Ok(Stmt::Import(ImportStmt { module, items: Some(items) }))
+    }
+
+    fn parse_class_statement(&mut self) -> Result<Stmt, String> {
+        self.consume(Token::Class)?;
+        let class_name = self.consume_identifier()?;
+        
+        self.consume(Token::LBrace)?;
+        
+        let mut members = Vec::new();
+        let mut methods = Vec::new();
+        
+        while !matches!(self.peek(), Some(Token::RBrace)) {
+            if matches!(self.peek(), Some(Token::Plug)) {
+                // Parse member variable or method
+                self.consume(Token::Plug)?;
+                let name = self.consume_identifier()?;
+                
+                if matches!(self.peek(), Some(Token::LParen)) {
+                    // This is a method (function)
+                    let method = self.parse_function_declaration(name)?;
+                    if let Stmt::FunctionDecl(func_decl) = method {
+                        methods.push(func_decl);
+                    }
+                } else {
+                    // This is a member variable
+                    let type_annotation = if self.maybe_consume(Token::Colon) {
+                        Some(self.consume_type()?)
+                    } else {
+                        None
+                    };
+                    
+                    let initializer = if self.maybe_consume(Token::Assign) {
+                        Some(self.parse_expression(0)?)
+                    } else {
+                        None
+                    };
+                    
+                    self.consume(Token::Semicolon)?;
+                    
+                    members.push(VarDeclStmt {
+                        name,
+                        type_annotation,
+                        initializer,
+                        mutable: false, // Members are not mutable by default
+                    });
+                }
+            } else {
+                return Err("Expected 'plug' keyword for class members".to_string());
+            }
+        }
+        
+        self.consume(Token::RBrace)?;
+        
+        Ok(Stmt::ClassDecl(ClassDeclStmt {
+            name: class_name,
+            members,
+            methods,
+        }))
     }
 }
 

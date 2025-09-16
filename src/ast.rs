@@ -3,7 +3,7 @@ pub struct Program {
     pub body: Vec<Stmt>,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 #[allow(dead_code)]
 pub enum Stmt {
     Expr(Expr),
@@ -18,7 +18,7 @@ pub enum Stmt {
     Import(ImportStmt),
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct VarDeclStmt {
     pub name: String,
     pub type_annotation: Option<Type>,
@@ -26,7 +26,7 @@ pub struct VarDeclStmt {
     pub mutable: bool,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct FunctionDeclStmt {
     pub name: String,
     pub params: Vec<(String, Type)>, // (name, type)
@@ -34,14 +34,14 @@ pub struct FunctionDeclStmt {
     pub body: Vec<Stmt>,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct ClassDeclStmt {
     pub name: String,
     pub members: Vec<VarDeclStmt>,
     pub methods: Vec<FunctionDeclStmt>,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum Expr {
     Literal(LiteralExpr),
     Binary(BinaryExpr),
@@ -49,15 +49,17 @@ pub enum Expr {
     Identifier(String),
     FunctionCall(FunctionCallExpr),
     Assignment(AssignmentExpr),
+    MemberAccess(MemberAccessExpr),
+    ObjectInstantiation(ObjectInstantiationExpr),
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct FunctionCallExpr {
     pub name: String,
     pub args: Vec<Expr>,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum LiteralExpr {
     Int(i64),
     Float(f64),
@@ -68,14 +70,14 @@ pub enum LiteralExpr {
     Dict(Vec<(Expr, Expr)>), // Key-value pairs
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct BinaryExpr {
     pub op: BinaryOp,
     pub left: Box<Expr>,
     pub right: Box<Expr>,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct UnaryExpr {
     pub op: UnaryOp,
     pub operand: Box<Expr>,
@@ -137,35 +139,47 @@ pub enum Type {
 
 // Type implementation methods can be added back when needed for type checking
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct AssignmentExpr {
     pub target: String,
     pub value: Box<Expr>,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct IfStmt {
     pub condition: Expr,
     pub then_branch: Vec<Stmt>,
     pub else_branch: Option<Vec<Stmt>>,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct WhileStmt {
     pub condition: Expr,
     pub body: Vec<Stmt>,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct ForStmt {
     pub variable: String,
     pub iterable: Expr,
     pub body: Vec<Stmt>,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct ImportStmt {
     pub module: String,
     pub items: Option<Vec<String>>, // None for "import module", Some(vec) for "from module import items"
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct MemberAccessExpr {
+    pub object: Box<Expr>,
+    pub member: String,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct ObjectInstantiationExpr {
+    pub class_name: String,
+    pub args: Vec<Expr>,
 }
 
