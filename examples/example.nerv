@@ -1,0 +1,12 @@
+plug fibonacci(n: int): int {
+    if (n <= 1) {
+        return n;
+    } else {
+        return fibonacci(n - 1) + fibonacci(n - 2);
+    }
+}
+
+plug x: int = 10;
+
+print(42);
+print(fibonacci(x));
