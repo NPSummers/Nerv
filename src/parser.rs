@@ -24,6 +24,7 @@ impl<'a> Parser<'a> {
 
     fn parse_statement(&mut self) -> Result<Stmt, String> {
         match self.peek() {
+            Some(Token::For) => self.parse_for_statement(),
             Some(Token::Plug) => {
                 // Look ahead to see if this is a function or variable declaration
                 self.parse_plug_statement()
@@ -44,6 +45,25 @@ impl<'a> Parser<'a> {
                 Ok(Stmt::Expr(expr))
             }
         }
+    }
+
+    fn parse_for_statement(&mut self) -> Result<Stmt, String> {
+        // Syntax: for (i in range(start, end[, step])) { ... }
+        self.consume(Token::For)?;
+        self.consume(Token::LParen)?;
+        let var_name = self.consume_identifier()?;
+        self.consume(Token::In)?;
+        let iterable = self.parse_expression(0)?;
+        self.consume(Token::RParen)?;
+
+        self.consume(Token::LBrace)?;
+        let mut body = Vec::new();
+        while !matches!(self.peek(), Some(Token::RBrace)) {
+            body.push(self.parse_statement()?);
+        }
+        self.consume(Token::RBrace)?;
+
+        Ok(Stmt::For(ForStmt { variable: var_name, iterable, body }))
     }
 
 

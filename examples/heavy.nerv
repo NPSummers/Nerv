@@ -1,0 +1,16 @@
+plug u: int = 21;
+plug r: int = 5000;
+plug a: list<int> = [0] * 10000;
+
+plug cur: int = 0;
+
+for (i in range(0, 10000)) {
+    for (j in range(0, 100000)) {
+        cur = list_get(a, i);
+        cur = cur + (j % u);
+        list_set(a, i, cur);
+    }
+    list_set(a, i, list_get(a, i) + r);
+}
+
+print(list_get(a, r));

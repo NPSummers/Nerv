@@ -1,0 +1,7 @@
+
+
+plug main(): int {
+    plug vars: string = "Variables" + argv(0);
+    print(vars);
+    return 0;
+}

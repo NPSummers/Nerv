@@ -3,6 +3,38 @@ use inkwell::module::Module;
 use inkwell::values::FunctionValue;
 use inkwell::AddressSpace;
 
+// Builtin registry (language-level functions implemented in codegen)
+#[macro_export]
+macro_rules! define_builtins {
+    ($($name:literal => $variant:ident),* $(,)?) => {
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+        pub enum BuiltinOp {
+            $( $variant, )*
+        }
+
+        pub fn builtin_lookup(name: &str) -> Option<BuiltinOp> {
+            match name {
+                $( $name => Some(BuiltinOp::$variant), )*
+                _ => None,
+            }
+        }
+    }
+}
+
+// Instantiate builtin registry with current builtins
+define_builtins! {
+    "argc" => Argc,
+    "argv" => Argv,
+    "print_str" => PrintStr,
+    "list_fill" => ListFill,
+    "list_add_range" => ListAddRange,
+    "len" => Len,
+    "list_get" => ListGet,
+    "list_set" => ListSet,
+    "dict_get" => DictGet,
+    "dict_set" => DictSet,
+}
+
 // Exported macro for generating stdlib tokens in lexer
 #[macro_export]
 macro_rules! stdlib_tokens {

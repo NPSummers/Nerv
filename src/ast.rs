@@ -42,6 +42,7 @@ pub struct ClassDeclStmt {
 }
 
 #[derive(Debug, PartialEq, Clone)]
+#[allow(dead_code)]
 pub enum Expr {
     Literal(LiteralExpr),
     Binary(BinaryExpr),

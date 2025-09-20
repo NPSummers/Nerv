@@ -58,6 +58,14 @@ while (i < 3) {
 
 # Arrays/Lists (basic support)
 plug numbers: list<int> = [1, 2, 3, 4, 5];
+print(len(numbers));   # 5
+print(list_get(numbers, 2)); # 3
+list_set(numbers, 2, 9);
+print(list_get(numbers, 2)); # 9
+
+plug scores: dict<string, int> = {"a": 1, "b": 2};
+print(len(scores));    # 2
+print(dict_get(scores, "a")); # 1
 
 # Classes and Object-Oriented Programming - FULLY WORKING!
 class Calculator {
