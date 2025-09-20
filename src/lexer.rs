@@ -81,6 +81,21 @@ pub enum Token {
     Char(char),
 
     // Operators
+    // Multi-char operators must come before their prefixes
+    #[token("+=")]
+    PlusAssign,
+    #[token("-=")]
+    MinusAssign,
+    #[token("*=")]
+    StarAssign,
+    #[token("/=")]
+    SlashAssign,
+    #[token("++")]
+    PlusPlus,
+    #[token("--")]
+    MinusMinus,
+    #[token("..")]
+    DotDot,
     #[token("=")]
     Assign,
     #[token("+")]

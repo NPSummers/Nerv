@@ -208,4 +208,16 @@ define_stdlib_functions! {
     // random
     "rand" => rand() -> i32,
     "srand" => srand(seed: i32) -> void,
+    // networking shims (C ABI)
+    "http_get" => http_get(url: i8_ptr) -> i8_ptr,
+    "http_post" => http_post(url: i8_ptr, body: i8_ptr) -> i8_ptr,
+    "ws_connect" => ws_connect(url: i8_ptr) -> i32,
+    "ws_send" => ws_send(handle: i32, msg: i8_ptr) -> i32,
+    "ws_recv" => ws_recv(handle: i32) -> i8_ptr,
+    "ws_close" => ws_close(handle: i32) -> i32,
+    // json utilities
+    "json_pretty" => json_pretty(s: i8_ptr) -> i8_ptr,
+    "json_to_dict_ss" => json_to_dict_ss(s: i8_ptr) -> i8_ptr,
+    // libc helpers
+    "strcmp" => strcmp(a: i8_ptr, b: i8_ptr) -> i32,
 }

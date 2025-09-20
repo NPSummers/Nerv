@@ -22,6 +22,50 @@ impl<'a> Parser<'a> {
         Self { input, tokens, pos: 0, last_error_span: None }
     }
 
+    // Parse interpolated string segments from raw string content (no quotes)
+    fn parse_interpolated_segments(&mut self, raw: &str) -> Result<Vec<InterpolatedSegment>, String> {
+        let mut segs: Vec<InterpolatedSegment> = Vec::new();
+        let bytes = raw.as_bytes();
+        let mut i = 0;
+        let mut last_text_start = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'{' {
+                // Support both "{expr}" and "#{expr}" forms. If there is a leading '#', do not keep it in text.
+                let text_end = if i > 0 && bytes[i - 1] == b'#' { i - 1 } else { i };
+                if text_end > last_text_start {
+                    segs.push(InterpolatedSegment::Text(raw[last_text_start..text_end].to_string()));
+                }
+                // find matching '}'
+                i += 1;
+                let expr_start = i;
+                let mut depth = 1;
+                while i < bytes.len() && depth > 0 {
+                    match bytes[i] {
+                        b'{' => depth += 1,
+                        b'}' => { depth -= 1; if depth == 0 { break; } },
+                        _ => {}
+                    }
+                    i += 1;
+                }
+                if depth != 0 { return Err("Unterminated interpolation expression in string".to_string()); }
+                let expr_src = &raw[expr_start..i];
+                // Parse sub-expression with a fresh parser
+                let mut sub_parser = Parser::new(expr_src);
+                let expr = sub_parser.parse_expression(0)?;
+                segs.push(InterpolatedSegment::Expr(expr));
+                // consume closing '}' and set new text start
+                i += 1;
+                last_text_start = i;
+                continue;
+            }
+            i += 1;
+        }
+        if last_text_start < raw.len() {
+            segs.push(InterpolatedSegment::Text(raw[last_text_start..].to_string()));
+        }
+        Ok(segs)
+    }
+
     pub fn take_error_span(&mut self) -> Option<diagnostics::Span> {
         self.last_error_span.take()
     }
@@ -128,6 +172,14 @@ impl<'a> Parser<'a> {
                 }
                 continue;
             }
+            // Indexing: expr[expr]
+            if matches!(self.peek(), Some(Token::LBracket)) {
+                self.next(); // consume '['
+                let index_expr = self.parse_expression(0)?;
+                self.consume(Token::RBracket)?;
+                left = Expr::IndexAccess(IndexAccessExpr { object: Box::new(left), index: Box::new(index_expr) });
+                continue;
+            }
             
             // Check for assignment (special case)
             if matches!(self.peek(), Some(Token::Assign)) {
@@ -155,12 +207,121 @@ impl<'a> Parser<'a> {
                             ],
                         }));
                     }
+                    Expr::IndexAccess(index_access) => {
+                        // Handle indexed assignment: a[i] = v
+                        self.next(); // Consume '='
+                        let value = self.parse_expression(0)?;
+                        // Special function call for index assignment
+                        return Ok(Expr::FunctionCall(FunctionCallExpr {
+                            name: "INDEX_ASSIGN".to_string(),
+                            args: vec![
+                                *index_access.object.clone(),
+                                *index_access.index.clone(),
+                                value,
+                            ],
+                        }));
+                    }
                     _ => {
                         return Err("Invalid assignment target".to_string());
                     }
                 }
             }
+
+            // Compound assignments: +=, -=, *=, /=
+            if matches!(self.peek(), Some(Token::PlusAssign))
+                || matches!(self.peek(), Some(Token::MinusAssign))
+                || matches!(self.peek(), Some(Token::StarAssign))
+                || matches!(self.peek(), Some(Token::SlashAssign))
+            {
+                // Determine operator
+                let op_token = self.next().unwrap();
+                let rhs = self.parse_expression(0)?;
+                // Build LHS op RHS expression
+                let (assign_target, computed_value) = match &left {
+                    Expr::Identifier(name) => {
+                        let bin_op = match op_token {
+                            Token::PlusAssign => BinaryOp::Add,
+                            Token::MinusAssign => BinaryOp::Subtract,
+                            Token::StarAssign => BinaryOp::Multiply,
+                            Token::SlashAssign => BinaryOp::Divide,
+                            _ => unreachable!(),
+                        };
+                        (
+                            Some(name.clone()),
+                            Expr::Binary(BinaryExpr { op: bin_op, left: Box::new(left.clone()), right: Box::new(rhs) })
+                        )
+                    }
+                    Expr::MemberAccess(_) => {
+                        let bin_op = match op_token {
+                            Token::PlusAssign => BinaryOp::Add,
+                            Token::MinusAssign => BinaryOp::Subtract,
+                            Token::StarAssign => BinaryOp::Multiply,
+                            Token::SlashAssign => BinaryOp::Divide,
+                            _ => unreachable!(),
+                        };
+                        (None, Expr::Binary(BinaryExpr { op: bin_op, left: Box::new(left.clone()), right: Box::new(rhs) }))
+                    }
+                    Expr::IndexAccess(_) => {
+                        let bin_op = match op_token {
+                            Token::PlusAssign => BinaryOp::Add,
+                            Token::MinusAssign => BinaryOp::Subtract,
+                            Token::StarAssign => BinaryOp::Multiply,
+                            Token::SlashAssign => BinaryOp::Divide,
+                            _ => unreachable!(),
+                        };
+                        (None, Expr::Binary(BinaryExpr { op: bin_op, left: Box::new(left.clone()), right: Box::new(rhs) }))
+                    }
+                    _ => { return Err("Invalid target for compound assignment".to_string()); }
+                };
+
+                // Emit appropriate assignment form
+                return Ok(match (assign_target, &left) {
+                    (Some(name), _) => Expr::Assignment(AssignmentExpr { target: name, value: Box::new(computed_value) }),
+                    (None, Expr::MemberAccess(ma)) => Expr::FunctionCall(FunctionCallExpr {
+                        name: "MEMBER_ASSIGN".to_string(),
+                        args: vec![ Expr::MemberAccess(ma.clone()), computed_value ],
+                    }),
+                    (None, Expr::IndexAccess(ia)) => Expr::FunctionCall(FunctionCallExpr {
+                        name: "INDEX_ASSIGN".to_string(),
+                        args: vec![ *ia.object.clone(), *ia.index.clone(), computed_value ],
+                    }),
+                    _ => unreachable!(),
+                });
+            }
+
+            // Postfix ++ / --
+            if matches!(self.peek(), Some(Token::PlusPlus)) || matches!(self.peek(), Some(Token::MinusMinus)) {
+                let op_token = self.next().unwrap();
+                let one = Expr::Literal(LiteralExpr::Int(1));
+                let bin = match op_token {
+                    Token::PlusPlus => BinaryExpr { op: BinaryOp::Add, left: Box::new(left.clone()), right: Box::new(one) },
+                    Token::MinusMinus => BinaryExpr { op: BinaryOp::Subtract, left: Box::new(left.clone()), right: Box::new(one) },
+                    _ => unreachable!(),
+                };
+                // Desugar to assignment
+                left = match left.clone() {
+                    Expr::Identifier(name) => Expr::Assignment(AssignmentExpr { target: name, value: Box::new(Expr::Binary(bin)) }),
+                    Expr::MemberAccess(ma) => Expr::FunctionCall(FunctionCallExpr {
+                        name: "MEMBER_ASSIGN".to_string(),
+                        args: vec![ Expr::MemberAccess(ma), Expr::Binary(bin) ],
+                    }),
+                    Expr::IndexAccess(ia) => Expr::FunctionCall(FunctionCallExpr {
+                        name: "INDEX_ASSIGN".to_string(),
+                        args: vec![ *ia.object, *ia.index, Expr::Binary(bin) ],
+                    }),
+                    _ => return Err("Invalid target for increment/decrement".to_string()),
+                };
+                continue;
+            }
             
+            // Range sugar: a .. b  -> range(a, b)
+            if matches!(self.peek(), Some(Token::DotDot)) {
+                self.next(); // consume '..'
+                let right = self.parse_expression(9)?; // higher precedence than add/sub
+                left = Expr::FunctionCall(FunctionCallExpr { name: "range".to_string(), args: vec![left, right] });
+                continue;
+            }
+
             let op = self.get_binary_op()?;
             let op_precedence = self.get_op_precedence(&op);
             self.next(); // Consume operator
@@ -188,7 +349,14 @@ impl<'a> Parser<'a> {
         match token {
             Token::Integer(i) => Ok(Expr::Literal(LiteralExpr::Int(i))),
             Token::Float(f) => Ok(Expr::Literal(LiteralExpr::Float(f))),
-            Token::String(s) => Ok(Expr::Literal(LiteralExpr::String(s))),
+            Token::String(s) => {
+                if s.contains('{') {
+                    let segments = self.parse_interpolated_segments(&s)?;
+                    Ok(Expr::InterpolatedString(InterpolatedStringExpr { segments }))
+                } else {
+                    Ok(Expr::Literal(LiteralExpr::String(s)))
+                }
+            }
             Token::Char(c) => Ok(Expr::Literal(LiteralExpr::Char(c))),
             Token::True => Ok(Expr::Literal(LiteralExpr::Bool(true))),
             Token::False => Ok(Expr::Literal(LiteralExpr::Bool(false))),
@@ -303,6 +471,7 @@ impl<'a> Parser<'a> {
     fn get_op_precedence_from_token(token: &Token) -> u8 {
         match token {
             Token::Assign => 1,  // Assignment has very low precedence
+            Token::PlusAssign | Token::MinusAssign | Token::StarAssign | Token::SlashAssign => 1,
             Token::Or => 2,
             Token::And => 3,
             Token::BitwiseOr => 4,
@@ -310,10 +479,13 @@ impl<'a> Parser<'a> {
             Token::BitwiseAnd => 6,
             Token::Equal | Token::NotEqual => 7,
             Token::LessThan | Token::GreaterThan | Token::LessThanOrEqual | Token::GreaterThanOrEqual => 8,
+            Token::DotDot => 9,
             Token::LeftShift | Token::RightShift => 9,
             Token::Plus | Token::Minus => 10,
             Token::Star | Token::Slash | Token::Percent => 11,
             Token::Dot => 12,  // Member access has very high precedence
+            Token::LBracket => 12, // Indexing has very high precedence
+            Token::PlusPlus | Token::MinusMinus => 12, // Postfix inc/dec
             _ => 0,
         }
     }

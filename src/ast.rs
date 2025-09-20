@@ -52,6 +52,8 @@ pub enum Expr {
     Assignment(AssignmentExpr),
     MemberAccess(MemberAccessExpr),
     ObjectInstantiation(ObjectInstantiationExpr),
+    IndexAccess(IndexAccessExpr),
+    InterpolatedString(InterpolatedStringExpr),
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -182,5 +184,22 @@ pub struct MemberAccessExpr {
 pub struct ObjectInstantiationExpr {
     pub class_name: String,
     pub args: Vec<Expr>,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct IndexAccessExpr {
+    pub object: Box<Expr>,
+    pub index: Box<Expr>,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct InterpolatedStringExpr {
+    pub segments: Vec<InterpolatedSegment>,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum InterpolatedSegment {
+    Text(String),
+    Expr(Expr),
 }
 

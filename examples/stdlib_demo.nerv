@@ -2,12 +2,17 @@ plug main(): int {
     plug now: int = time(0);
     print(now);
 
-    plug home: int = getenv("HOME");
+    plug home: string = getenv("HOME");
     print(home);
 
     srand(1234);
     plug r: int = rand();
     print(r);
+    # Networking examples
+    plug body: dict<string, string> = http_get("https://httpbin.org/get");
+    print(body);
+    plug resp: dict<string, string> = http_post("https://httpbin.org/post", "hi");
+    print(resp);
     return 0;
 }
 

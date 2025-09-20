@@ -37,6 +37,12 @@ print(first_char);  # N
 print(add(10, 20)); # 30
 print(factorial(5)); # 120
 
+# New: for-in ranges and list iteration
+for (j in 0..3) {
+    print(j);
+}
+ 
+
 # Variables and assignment
 plug counter: int = 0;
 counter = counter + 1;
@@ -53,7 +59,7 @@ if (number > 40) {
 plug i: int = 0;
 while (i < 3) {
     print(i);       # 0, 1, 2
-    i = i + 1;
+    i += 1;
 }
 
 # Arrays/Lists (basic support)
@@ -63,9 +69,23 @@ print(list_get(numbers, 2)); # 3
 list_set(numbers, 2, 9);
 print(list_get(numbers, 2)); # 9
 
+# New: indexing sugar
+print(numbers[2]);
+numbers[2] = 11;
+print(numbers[2]);
+
+# Iterate list after declaration
+for (val in numbers) {
+    print(val);
+}
+
 plug scores: dict<string, int> = {"a": 1, "b": 2};
 print(len(scores));    # 2
 print(dict_get(scores, "a")); # 1
+
+print(scores["a"]);
+scores["a"] = 7;
+print(scores["a"]);
 
 # Classes and Object-Oriented Programming - FULLY WORKING!
 class Calculator {
@@ -92,3 +112,8 @@ print(calc.add(5));     # Method call: 15
 print(calc.getValue()); # Method call: 15
 
 # All features work including fully usable classes!
+# New: string interpolation
+plug name: string = "Nerv";
+plug x: int = 2;
+plug y: int = 3;
+print("Hello, {name}! #{x + y}");
