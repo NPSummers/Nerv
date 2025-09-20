@@ -1,0 +1,97 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    name: Build binaries
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Install LLVM 14 (Ubuntu)
+        if: startsWith(matrix.os, 'ubuntu')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y llvm-14 llvm-14-dev clang-14
+          echo "/usr/lib/llvm-14/bin" >> $GITHUB_PATH
+          echo "LLVM_SYS_140_PREFIX=/usr/lib/llvm-14" >> $GITHUB_ENV
+
+      - name: Install LLVM 14 (macOS)
+        if: startsWith(matrix.os, 'macos')
+        run: |
+          brew update
+          brew install llvm@14
+          LLVM_PREFIX=$(brew --prefix llvm@14)
+          echo "$LLVM_PREFIX/bin" >> $GITHUB_PATH
+          echo "LLVM_SYS_140_PREFIX=$LLVM_PREFIX" >> $GITHUB_ENV
+
+      - name: Verify LLVM
+        run: |
+          which llvm-config || true
+          llvm-config --version
+          echo "LLVM_SYS_140_PREFIX=$LLVM_SYS_140_PREFIX"
+
+      - name: Build (release)
+        run: |
+          cargo build --release
+
+      - name: Prepare artifact
+        shell: bash
+        run: |
+          BIN_NAME=nerv
+          ARTIFACT_DIR=artifacts
+          mkdir -p "$ARTIFACT_DIR"
+          if [[ "${{ matrix.os }}" == macos-* ]]; then
+            cp target/release/$BIN_NAME "$ARTIFACT_DIR/${BIN_NAME}-macos-universal"
+          else
+            strip target/release/$BIN_NAME || true
+            cp target/release/$BIN_NAME "$ARTIFACT_DIR/${BIN_NAME}-linux-x86_64"
+          fi
+          ls -lah "$ARTIFACT_DIR"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ runner.os }}-artifacts
+          path: artifacts/*
+
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Display structure of downloaded files
+        run: ls -R dist | cat
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/**/nerv-*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+
