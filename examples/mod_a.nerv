@@ -1,0 +1,10 @@
+plug x: int = 7;
+
+plug greet(name: string): int {
+    print("Hello, ");
+    print(name);
+    print("!\n");
+    return 0;
+}
+
+

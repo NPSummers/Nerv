@@ -1,5 +1,5 @@
 use crate::ast::*;
-use crate::stdlib::{ExternalFunctions, builtin_lookup, BuiltinOp};
+use crate::stdlib::{ExternalFunctions, builtin_lookup, BuiltinOp, get_function_signature};
 // use inkwell::values::BasicValue; // not needed currently
 use inkwell::builder::Builder;
 use inkwell::context::Context;
@@ -694,8 +694,75 @@ impl<'ctx> CodeGenerator<'ctx> {
         let stdlib_func = self.external_functions.get_function_by_name(&func_call.name)
             .ok_or_else(|| format!("Unknown function: {}", func_call.name))?;
 
-        // Generate arguments
+        // If we know the signature, coerce arguments accordingly
         let mut args = Vec::new();
+        if let Some((param_types, ret_ty)) = get_function_signature(&func_call.name) {
+            for (idx, arg_expr) in func_call.args.iter().enumerate() {
+                let expected = param_types.get(idx).copied().unwrap_or("i32");
+                match expected {
+                    "i8_ptr" => {
+                        match arg_expr {
+                            Expr::Literal(LiteralExpr::String(s)) => {
+                                let ptr = self.builder.build_global_string_ptr(s, ".str").as_pointer_value();
+                                args.push(ptr.into());
+                            }
+                            _ => {
+                                let int_val = self.gen_expr(arg_expr, _function)?;
+                                let ptr_ty = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+                                let ptr = self.builder.build_int_to_ptr(int_val, ptr_ty, "int_to_ptr");
+                                args.push(ptr.into());
+                            }
+                        }
+                    }
+                    "f64" => {
+                        let int_val = self.gen_expr(arg_expr, _function)?;
+                        let float_val = self.builder.build_signed_int_to_float(int_val, self.context.f64_type(), "int_to_f64");
+                        args.push(float_val.into());
+                    }
+                    "bool" => {
+                        let int_val = self.gen_expr(arg_expr, _function)?;
+                        let i1 = self.builder.build_int_truncate_or_bit_cast(int_val, self.context.bool_type(), "to_bool");
+                        args.push(i1.into());
+                    }
+                    _ => {
+                        // default to i32
+                        match arg_expr {
+                            Expr::Literal(LiteralExpr::String(s)) => {
+                                let ptr = self.builder.build_global_string_ptr(s, ".str").as_pointer_value();
+                                let int_val = self.builder.build_ptr_to_int(ptr, self.context.i32_type(), "ptr_to_int");
+                                args.push(int_val.into());
+                            }
+                            _ => {
+                                let int_val = self.gen_expr(arg_expr, _function)?;
+                                args.push(int_val.into());
+                            }
+                        }
+                    }
+                }
+            }
+            // Call the function
+            let call_result = self.builder.build_call(stdlib_func, &args, "call");
+            // Coerce return
+            return Ok(match ret_ty {
+                "void" => self.context.i32_type().const_int(0, false),
+                "i32" => call_result.try_as_basic_value().left().unwrap().into_int_value(),
+                "i8_ptr" => {
+                    let ptr = call_result.try_as_basic_value().left().unwrap().into_pointer_value();
+                    self.builder.build_ptr_to_int(ptr, self.context.i32_type(), "ptr_to_int_ret")
+                }
+                "f64" => {
+                    let f = call_result.try_as_basic_value().left().unwrap().into_float_value();
+                    self.builder.build_float_to_signed_int(f, self.context.i32_type(), "f64_to_i32")
+                }
+                "bool" => {
+                    let b = call_result.try_as_basic_value().left().unwrap().into_int_value();
+                    self.builder.build_int_z_extend_or_bit_cast(b, self.context.i32_type(), "bool_to_i32")
+                }
+                _ => return Err("Unsupported function return type".to_string()),
+            });
+        }
+
+        // Fallback: best-effort old behavior
         for arg_expr in &func_call.args {
             match arg_expr {
                 Expr::Literal(LiteralExpr::Int(val)) => {
@@ -706,32 +773,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                     args.push(global_str.into());
                 }
                 _ => {
-                    // For other expressions, generate them as integers for now
                     let expr_val = self.gen_expr(arg_expr, _function)?;
                     args.push(expr_val.into());
                 }
             }
         }
-
-        // Call the function
         let call_result = self.builder.build_call(stdlib_func, &args, "call");
-        
-        // Handle return value based on function signature
-        match func_call.name.as_str() {
-            "printf" | "puts" | "abs" => {
-                Ok(call_result.try_as_basic_value().left().unwrap().into_int_value())
-            }
-            "malloc" | "free" => {
-                // These return pointers or void, return 0 for now
-                Ok(self.context.i32_type().const_int(0, false))
-            }
-            "sqrt" | "pow" => {
-                // These return floats, but for now cast to int
-                let float_val = call_result.try_as_basic_value().left().unwrap().into_float_value();
-                Ok(self.builder.build_float_to_signed_int(float_val, self.context.i32_type(), "float_to_int"))
-            }
-            _ => Err(format!("Unsupported function: {}", func_call.name))
-        }
+        Ok(call_result.try_as_basic_value().left().map(|v| v.into_int_value()).unwrap_or_else(|| self.context.i32_type().const_int(0, false)))
     }
 
     // Builtin: len(list|dict)

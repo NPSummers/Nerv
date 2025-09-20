@@ -196,4 +196,16 @@ define_stdlib_functions! {
     "abs" => abs(x: i32) -> i32,
     "sqrt" => sqrt(x: f64) -> f64,
     "pow" => pow(base: f64, exp: f64) -> f64,
+    // file I/O
+    "fopen" => fopen(path: i8_ptr, mode: i8_ptr) -> i8_ptr,
+    "fclose" => fclose(file: i8_ptr) -> i32,
+    "fread" => fread(ptr: i8_ptr, size: i32, nmemb: i32, stream: i8_ptr) -> i32,
+    "fwrite" => fwrite(ptr: i8_ptr, size: i32, nmemb: i32, stream: i8_ptr) -> i32,
+    // time
+    "time" => time(tloc: i8_ptr) -> i32,
+    // env
+    "getenv" => getenv(name: i8_ptr) -> i8_ptr,
+    // random
+    "rand" => rand() -> i32,
+    "srand" => srand(seed: i32) -> void,
 }

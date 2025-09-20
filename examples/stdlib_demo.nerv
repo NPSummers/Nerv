@@ -1,0 +1,14 @@
+plug main(): int {
+    plug now: int = time(0);
+    print(now);
+
+    plug home: int = getenv("HOME");
+    print(home);
+
+    srand(1234);
+    plug r: int = rand();
+    print(r);
+    return 0;
+}
+
+

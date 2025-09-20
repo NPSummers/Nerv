@@ -1,17 +1,29 @@
 use crate::ast::*;
 use crate::lexer::Token;
-use logos::{Lexer, Logos};
-use std::iter::Peekable;
+use crate::diagnostics;
+use logos::Logos;
+use std::ops::Range;
 
 pub struct Parser<'a> {
-    lexer: Peekable<Lexer<'a, Token>>,
+    input: &'a str,
+    tokens: Vec<(Token, Range<usize>)>,
+    pos: usize,
+    last_error_span: Option<diagnostics::Span>,
 }
 
 impl<'a> Parser<'a> {
     pub fn new(input: &'a str) -> Self {
-        Self {
-            lexer: Token::lexer(input).peekable(),
+        let mut lx = Token::lexer(input);
+        let mut tokens: Vec<(Token, Range<usize>)> = Vec::new();
+        while let Some(tok) = lx.next() {
+            let span = lx.span();
+            tokens.push((tok, span));
         }
+        Self { input, tokens, pos: 0, last_error_span: None }
+    }
+
+    pub fn take_error_span(&mut self) -> Option<diagnostics::Span> {
+        self.last_error_span.take()
     }
 
     pub fn parse_program(&mut self) -> Result<Program, String> {
@@ -39,6 +51,8 @@ impl<'a> Parser<'a> {
             _ => {
                 let expr = self.parse_expression(0)?;
                 if !matches!(self.peek(), Some(Token::Semicolon)) {
+                    let span = self.current_span().or_else(|| self.eof_span());
+                    self.last_error_span = span.map(|r| diagnostics::Span { start: r.start, end: r.end });
                     return Err(format!("Expected semicolon after expression, found {:?}", self.peek()));
                 }
                 self.consume(Token::Semicolon)?;
@@ -163,7 +177,14 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_prefix(&mut self) -> Result<Expr, String> {
-        let token = self.next().ok_or_else(|| "Unexpected end of input".to_string())?;
+        let token = match self.next() {
+            Some(t) => t,
+            None => {
+                let span = self.eof_span();
+                self.last_error_span = span.map(|r| diagnostics::Span { start: r.start, end: r.end });
+                return Err("Unexpected end of input".to_string());
+            }
+        };
         match token {
             Token::Integer(i) => Ok(Expr::Literal(LiteralExpr::Int(i))),
             Token::Float(f) => Ok(Expr::Literal(LiteralExpr::Float(f))),
@@ -205,7 +226,13 @@ impl<'a> Parser<'a> {
                 let name = token.as_function_name().unwrap().to_string();
                 self.parse_function_call(name)
             },
-            _ => Err(format!("Unexpected token {:?} for prefix expression", token)),
+            _ => {
+                let span = self.prev_span();
+                if let Some(r) = span {
+                    self.last_error_span = Some(diagnostics::Span { start: r.start, end: r.end });
+                }
+                Err(format!("Unexpected token {:?} for prefix expression", token))
+            },
         }
     }
 
@@ -330,19 +357,44 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn peek(&mut self) -> Option<&Token> {
-        self.lexer.peek()
+    fn peek(&self) -> Option<&Token> {
+        self.tokens.get(self.pos).map(|(t, _)| t)
+    }
+
+    fn current_span(&self) -> Option<Range<usize>> {
+        self.tokens.get(self.pos).map(|(_, r)| r.clone())
+    }
+
+    fn prev_span(&self) -> Option<Range<usize>> {
+        if self.pos == 0 { None } else { self.tokens.get(self.pos - 1).map(|(_, r)| r.clone()) }
+    }
+
+    fn eof_span(&self) -> Option<Range<usize>> {
+        Some(self.input.len()..self.input.len())
     }
 
     fn next(&mut self) -> Option<Token> {
-        self.lexer.next()
+        if let Some((t, _)) = self.tokens.get(self.pos).cloned() {
+            self.pos += 1;
+            Some(t)
+        } else {
+            None
+        }
     }
 
     fn consume(&mut self, expected: Token) -> Result<(), String> {
         match self.next() {
             Some(token) if tokens_match(&token, &expected) => Ok(()),
-            Some(token) => Err(format!("Expected {:?}, found {:?}", expected, token)),
-            None => Err(format!("Expected {:?}, found EOF", expected)),
+            Some(token) => {
+                let span = self.prev_span().or_else(|| self.current_span());
+                if let Some(r) = span { self.last_error_span = Some(diagnostics::Span { start: r.start, end: r.end }); }
+                Err(format!("Expected {:?}, found {:?}", expected, token))
+            },
+            None => {
+                let span = self.eof_span();
+                if let Some(r) = span { self.last_error_span = Some(diagnostics::Span { start: r.start, end: r.end }); }
+                Err(format!("Expected {:?}, found EOF", expected))
+            },
         }
     }
 
@@ -359,7 +411,11 @@ impl<'a> Parser<'a> {
     fn consume_identifier(&mut self) -> Result<String, String> {
         match self.next() {
             Some(Token::Identifier(name)) => Ok(name),
-            _ => Err("Expected an identifier".to_string()),
+            other => {
+                let span = self.prev_span().or_else(|| self.current_span()).or_else(|| self.eof_span());
+                if let Some(r) = span { self.last_error_span = Some(diagnostics::Span { start: r.start, end: r.end }); }
+                Err(format!("Expected an identifier, found {:?}", other))
+            }
         }
     }
 
@@ -385,7 +441,11 @@ impl<'a> Parser<'a> {
                 Ok(Type::Dict(Box::new(key_type), Box::new(value_type)))
             },
             Some(Token::Identifier(name)) => Ok(Type::Custom(name)),
-            _ => Err("Expected a type".to_string()),
+            other => {
+                let span = self.prev_span().or_else(|| self.current_span()).or_else(|| self.eof_span());
+                if let Some(r) = span { self.last_error_span = Some(diagnostics::Span { start: r.start, end: r.end }); }
+                Err(format!("Expected a type, found {:?}", other))
+            }
         }
     }
 

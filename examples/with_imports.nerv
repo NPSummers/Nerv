@@ -1,0 +1,10 @@
+import mod_a;
+
+from mod_a import greet;
+
+plug main(): int {
+    greet("Nerv");
+    return 0;
+}
+
+
