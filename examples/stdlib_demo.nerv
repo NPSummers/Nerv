@@ -9,9 +9,10 @@ plug main(): int {
     plug r: int = rand();
     print(r);
     # Networking examples
-    plug body: dict<string, string> = http_get("https://httpbin.org/get");
+    # http_request(method, url, headers_json, body)
+    plug body: dict<string, string> = http_request("GET", "https://httpbin.org/get", "{}", "");
     print(body);
-    plug resp: dict<string, string> = http_post("https://httpbin.org/post", "hi");
+    plug resp: dict<string, string> = http_request("POST", "https://httpbin.org/post", "{\"Content-Type\":\"text/plain\"}", "hi");
     print(resp);
     return 0;
 }

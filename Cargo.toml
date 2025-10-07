@@ -2,6 +2,10 @@
 name = "nerv"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
+repository = "https://github.com/NPSummers/nerv"
+description = "Nerv language interpreter/JIT (alpha)"
+readme = "README.md"
 
 [dependencies]
 logos = "0.12.0"

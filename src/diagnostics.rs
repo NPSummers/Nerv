@@ -1,3 +1,10 @@
+//! Lightweight diagnostic utilities for human-friendly error reporting.
+//!
+//! Responsibilities:
+//! - Convert byte offsets into line/column for caret diagnostics.
+//! - Render compact, colorized error messages without external crates.
+//! - Keep footprint minimal so diagnostics are easily reusable in all stages.
+//!
 pub struct Span {
     pub start: usize,
     pub end: usize,

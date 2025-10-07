@@ -2,12 +2,19 @@
     <img src="./assets/nerv.png" height=300>
     <h1>Nerv</h1>
 
-[**Quick Start**](#) | [**Contributing**](#contributing) | [**License**](#license)
+[**Quick Start**](#quick-start) | [**Contributing**](#contributing) | [**License**](#license)
 
 </div>
 
 > [!IMPORTANT]
 > Nerv is in early alpha and still in development; breaking bugs and missing features should be expected.
+
+## Quick Start
+
+```bash
+cargo build
+echo "print(\"Hello, Nerv!\");" | cargo run --quiet
+```
 
 A basic showcase is in the [**Showcase**](./examples/showcase.nerv) file.
 

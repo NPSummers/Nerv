@@ -1,3 +1,13 @@
+//! Recursive-descent parser for Nerv producing the AST in `ast.rs`.
+//!
+//! Parsing strategy:
+//! - Token stream is fully materialized with spans to support rich diagnostics.
+//! - Expression parsing uses precedence climbing via `parse_expression(precedence)`.
+//! - Certain syntactic sugars are desugared into special `Expr::FunctionCall`s to keep
+//!   codegen simple (e.g., member assign, index assign, range `a .. b`).
+//! - Strings can include interpolation segments, handled by `parse_interpolated_segments`.
+//! - On parse errors, we record the best-effort span for later pretty error rendering.
+//!
 use crate::ast::*;
 use crate::lexer::Token;
 use crate::diagnostics;
@@ -24,14 +34,16 @@ impl<'a> Parser<'a> {
 
     // Parse interpolated string segments from raw string content (no quotes)
     fn parse_interpolated_segments(&mut self, raw: &str) -> Result<Vec<InterpolatedSegment>, String> {
+        // Interpolation is ONLY triggered by the marker `#{expr}` to avoid
+        // ambiguity with JSON/object-like strings containing `{` and `}`.
         let mut segs: Vec<InterpolatedSegment> = Vec::new();
         let bytes = raw.as_bytes();
         let mut i = 0;
         let mut last_text_start = 0;
         while i < bytes.len() {
-            if bytes[i] == b'{' {
-                // Support both "{expr}" and "#{expr}" forms. If there is a leading '#', do not keep it in text.
-                let text_end = if i > 0 && bytes[i - 1] == b'#' { i - 1 } else { i };
+            if bytes[i] == b'{' && i > 0 && bytes[i - 1] == b'#' {
+                // Found interpolation start "#{" — drop the preceding '#' from text
+                let text_end = i - 1;
                 if text_end > last_text_start {
                     segs.push(InterpolatedSegment::Text(raw[last_text_start..text_end].to_string()));
                 }
@@ -49,7 +61,7 @@ impl<'a> Parser<'a> {
                 }
                 if depth != 0 { return Err("Unterminated interpolation expression in string".to_string()); }
                 let expr_src = &raw[expr_start..i];
-                // Parse sub-expression with a fresh parser
+                // Parse sub-expression with a fresh parser so precedence rules remain consistent
                 let mut sub_parser = Parser::new(expr_src);
                 let expr = sub_parser.parse_expression(0)?;
                 segs.push(InterpolatedSegment::Expr(expr));
@@ -136,7 +148,7 @@ impl<'a> Parser<'a> {
                 
                 // Check if this is followed by parentheses (method call)
                 if matches!(self.peek(), Some(Token::LParen)) {
-                    // This is a method call
+                    // This is a method call: represent as a call with a leading receiver arg
                     self.consume(Token::LParen)?;
                     let mut args = Vec::new();
                     
@@ -197,8 +209,7 @@ impl<'a> Parser<'a> {
                         self.next(); // Consume '='
                         let value = self.parse_expression(0)?;
                         
-                        // Create a special assignment expression for member access
-                        // We'll use a function call with a special name to represent this
+                        // Represent `obj.member = v` as a special call handled in codegen
                         return Ok(Expr::FunctionCall(FunctionCallExpr {
                             name: "MEMBER_ASSIGN".to_string(),
                             args: vec![
@@ -211,7 +222,7 @@ impl<'a> Parser<'a> {
                         // Handle indexed assignment: a[i] = v
                         self.next(); // Consume '='
                         let value = self.parse_expression(0)?;
-                        // Special function call for index assignment
+                        // Represent `a[i] = v` as a special call handled in codegen
                         return Ok(Expr::FunctionCall(FunctionCallExpr {
                             name: "INDEX_ASSIGN".to_string(),
                             args: vec![
@@ -289,7 +300,7 @@ impl<'a> Parser<'a> {
                 });
             }
 
-            // Postfix ++ / --
+            // Postfix ++ / --: desugar to assignment with +/- 1
             if matches!(self.peek(), Some(Token::PlusPlus)) || matches!(self.peek(), Some(Token::MinusMinus)) {
                 let op_token = self.next().unwrap();
                 let one = Expr::Literal(LiteralExpr::Int(1));
@@ -389,10 +400,6 @@ impl<'a> Parser<'a> {
                 let expr = self.parse_expression(0)?;
                 self.consume(Token::RParen)?;
                 Ok(expr)
-            },
-            token if token.is_stdlib_function() => {
-                let name = token.as_function_name().unwrap().to_string();
-                self.parse_function_call(name)
             },
             _ => {
                 let span = self.prev_span();

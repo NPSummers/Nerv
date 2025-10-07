@@ -1,23 +1,17 @@
+//! Tokenizer for the Nerv language.
+//!
+//! Notes for maintainers:
+//! - Whitespace and comments are skipped by the lexer; the parser does not see them.
+//! - Multi-character operators must appear before prefixes (e.g., "==" before "=").
+//! - Nested multi-line comments are supported using the `#{ ... }#` delimiters.
+//! - Standard library function names are NOT special-cased here; they are
+//!   lexed as identifiers to make adding new std functions a single-change in
+//!   `stdlib.rs` and/or codegen only.
+//!
 use logos::Logos;
 
 #[derive(Logos, Debug, PartialEq, Clone)]
 pub enum Token {
-    // Standard library function tokens (auto-generated via macro)
-    #[token("printf")]
-    Printf,
-    #[token("puts")]
-    Puts,
-    #[token("malloc")]
-    Malloc,
-    #[token("free")]
-    Free,
-    #[token("abs")]
-    Abs,
-    #[token("sqrt")]
-    Sqrt,
-    #[token("pow")]
-    Pow,
-
     // Keywords
     #[token("plug")]
     Plug,
@@ -178,6 +172,8 @@ pub enum Token {
 }
 
 fn multi_line_comment(lexer: &mut logos::Lexer<Token>) -> logos::Skip {
+    // Implements nested multi-line comment skipping for `#{ ... }#`.
+    // Depth increases on `#{` and decreases on `}#` until it reaches 0.
     let mut depth = 1;
     let mut remainder = lexer.remainder();
     let mut len = 0;
@@ -202,5 +198,4 @@ fn multi_line_comment(lexer: &mut logos::Lexer<Token>) -> logos::Skip {
     logos::Skip
 }
 
-// Auto-generated stdlib token helper functions
-crate::stdlib_token_helpers!();
+    // No stdlib-specific token helpers; std functions are parsed as identifiers.

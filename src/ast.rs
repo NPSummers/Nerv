@@ -1,3 +1,9 @@
+//! Abstract Syntax Tree (AST) definitions for the Nerv language.
+//!
+//! This module intentionally stays simple and data-only. Semantic decisions are
+//! deferred to later phases (module resolution, codegen). Keep this free of
+//! evaluation logic to preserve clarity and make parsing/unit tests straightforward.
+//!
 #[derive(Debug, PartialEq, Clone)]
 pub struct Program {
     pub body: Vec<Stmt>,

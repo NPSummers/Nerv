@@ -1,3 +1,11 @@
+//! Import resolver that expands `import` statements by inlining module contents.
+//!
+//! Design:
+//! - Modules map to files named `<name>.nerv` found under configured search paths.
+//! - `import foo;` inlines all top-level declarations from `foo`.
+//! - `from foo import a, b;` inlines only the selected declarations.
+//! - Basic cycle detection prevents infinite recursion on circular imports.
+//!
 use crate::ast::*;
 use crate::parser::Parser;
 use crate::diagnostics;

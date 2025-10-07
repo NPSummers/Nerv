@@ -1,1 +1,16 @@
+# Build artifacts
+/target/
+
+# IDE/editor
+.vscode/
+.idea/
+*.iml
+
+# OS
+.DS_Store
+
+# Swap files
+*.swp
+*.swo
+
 /target

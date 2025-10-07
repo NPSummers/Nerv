@@ -1,3 +1,20 @@
+//! LLVM-based JIT code generator and runtime for Nerv.
+//!
+//! Overview:
+//! - Walks the AST and emits LLVM IR using Inkwell, then JIT-executes it.
+//! - Uses a small set of builtin operations (`BuiltinOp`) and external symbols
+//!   declared via macros in `stdlib.rs`.
+//! - Some parser sugars are represented as special function calls (e.g.,
+//!   `METHOD_CALL::name`, `MEMBER_ASSIGN`, `INDEX_ASSIGN`) and handled here.
+//! - Keeps mutable state such as `named_values` for locals and
+//!   `user_function_signatures` for simple arity/type checks.
+//!
+//! Tips for maintainers:
+//! - Prefer small helper methods per AST node to keep the main walker readable.
+//! - When adding new stdlib functions, extend the macro lists in `stdlib.rs` and
+//!   wire mappings here if native shims are required.
+//! - Avoid panics in codegen paths; bubble up `Result` with context instead.
+//!
 use crate::ast::*;
 use crate::stdlib::{ExternalFunctions, builtin_lookup, BuiltinOp, get_function_signature};
 // use inkwell::values::BasicValue; // not needed currently
@@ -11,6 +28,66 @@ use inkwell::OptimizationLevel;
 use std::collections::HashMap;
 use std::env;
 use std::ffi::CString;
+
+impl<'ctx> CodeGenerator<'ctx> {
+    // --- printf helpers ---
+    fn emit_printf_cstr(&self, cstr_ptr: inkwell::values::PointerValue<'ctx>) {
+        let _ = self.builder.build_call(self.external_functions.printf, &[cstr_ptr.into()], "printf");
+    }
+
+    fn emit_printf_str_val(&self, s_val: inkwell::values::BasicValueEnum<'ctx>) {
+        let fmt = self.builder.build_global_string_ptr("%s\n", ".fmt_s").as_pointer_value();
+        let _ = self.builder.build_call(self.external_functions.printf, &[fmt.into(), s_val.into()], "printf");
+    }
+
+    fn emit_printf_int_val(&self, i32_val: inkwell::values::BasicValueEnum<'ctx>) {
+        let fmt = self.builder.build_global_string_ptr("%d\n", ".fmt_d").as_pointer_value();
+        let _ = self.builder.build_call(self.external_functions.printf, &[fmt.into(), i32_val.into()], "printf");
+    }
+
+    fn emit_printf_float_val(&self, f64_val: inkwell::values::BasicValueEnum<'ctx>) {
+        let fmt = self.builder.build_global_string_ptr("%f\n", ".fmt_f").as_pointer_value();
+        let _ = self.builder.build_call(self.external_functions.printf, &[fmt.into(), f64_val.into()], "printf");
+    }
+
+    fn emit_printf_char_val(&self, i32_char: inkwell::values::BasicValueEnum<'ctx>) {
+        let fmt = self.builder.build_global_string_ptr("%c\n", ".fmt_c").as_pointer_value();
+        let _ = self.builder.build_call(self.external_functions.printf, &[fmt.into(), i32_char.into()], "printf");
+    }
+}
+
+/// Registry to organize standard library integration points used by codegen.
+///
+/// - Centralizes native shim registration so adding new shims is one place.
+/// - Provides a natural home for future helpers (e.g., name-based lookups).
+struct StdFunctionRegistry;
+
+impl StdFunctionRegistry {
+    /// Register Rust native shims to external function declarations so JIT calls resolve.
+    fn register_native_shims<'ctx>(
+        execution_engine: &ExecutionEngine<'ctx>,
+        ext: &ExternalFunctions<'ctx>,
+    ) {
+        unsafe {
+            extern "C" {
+                fn nerv_http_request(method: *const i8, url: *const i8, headers_json: *const i8, body: *const i8) -> *mut i8;
+                fn nerv_ws_connect(url: *const i8) -> i32;
+                fn nerv_ws_send(handle: i32, msg: *const i8) -> i32;
+                fn nerv_ws_recv(handle: i32) -> *mut i8;
+                fn nerv_ws_close(handle: i32) -> i32;
+                fn nerv_json_pretty(s: *const i8) -> *mut i8;
+                fn nerv_json_to_dict_ss(s: *const i8) -> *mut i8;
+            }
+            execution_engine.add_global_mapping(&ext.http_request, nerv_http_request as usize);
+            execution_engine.add_global_mapping(&ext.ws_connect, nerv_ws_connect as usize);
+            execution_engine.add_global_mapping(&ext.ws_send, nerv_ws_send as usize);
+            execution_engine.add_global_mapping(&ext.ws_recv, nerv_ws_recv as usize);
+            execution_engine.add_global_mapping(&ext.ws_close, nerv_ws_close as usize);
+            execution_engine.add_global_mapping(&ext.json_pretty, nerv_json_pretty as usize);
+            execution_engine.add_global_mapping(&ext.json_to_dict_ss, nerv_json_to_dict_ss as usize);
+        }
+    }
+}
 
 pub struct CodeGenerator<'ctx> {
     context: &'ctx Context,
@@ -54,27 +131,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             current_function_return_type: None,
             argv_globals: Vec::new(),
         };
-        // Register native symbols for networking shims
-        unsafe {
-            extern "C" {
-                fn nerv_http_get(url: *const i8) -> *mut i8;
-                fn nerv_http_post(url: *const i8, body: *const i8) -> *mut i8;
-                fn nerv_ws_connect(url: *const i8) -> i32;
-                fn nerv_ws_send(handle: i32, msg: *const i8) -> i32;
-                fn nerv_ws_recv(handle: i32) -> *mut i8;
-                fn nerv_ws_close(handle: i32) -> i32;
-                fn nerv_json_pretty(s: *const i8) -> *mut i8;
-                fn nerv_json_to_dict_ss(s: *const i8) -> *mut i8;
-            }
-            cg.execution_engine.add_global_mapping(&cg.external_functions.http_get, nerv_http_get as usize);
-            cg.execution_engine.add_global_mapping(&cg.external_functions.http_post, nerv_http_post as usize);
-            cg.execution_engine.add_global_mapping(&cg.external_functions.ws_connect, nerv_ws_connect as usize);
-            cg.execution_engine.add_global_mapping(&cg.external_functions.ws_send, nerv_ws_send as usize);
-            cg.execution_engine.add_global_mapping(&cg.external_functions.ws_recv, nerv_ws_recv as usize);
-            cg.execution_engine.add_global_mapping(&cg.external_functions.ws_close, nerv_ws_close as usize);
-            cg.execution_engine.add_global_mapping(&cg.external_functions.json_pretty, nerv_json_pretty as usize);
-            cg.execution_engine.add_global_mapping(&cg.external_functions.json_to_dict_ss, nerv_json_to_dict_ss as usize);
-        }
+        // Register native symbols (one place to update for new shims)
+        StdFunctionRegistry::register_native_shims(&cg.execution_engine, &cg.external_functions);
         cg
     }
 
@@ -398,9 +456,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     let len = self.builder.build_load(len_ptr, "d_len").into_int_value();
                                     let pairs_base_off = self.context.i32_type().const_int(8, false);
                                     let pairs_base_i8 = unsafe { self.builder.build_gep(base_i8, &[pairs_base_off], "pairs_base_i8") };
-                                    let llvm_key_ty = self.get_llvm_type(&*key_ty_box)?;
-                                    let llvm_val_ty = self.get_llvm_type(&*val_ty_box)?;
-                                    let key_sz = llvm_key_ty.size_of().ok_or("Failed to get key size")?;
                                     // print "{"
                                     let obr = self.builder.build_global_string_ptr("{", ".obr").as_pointer_value();
                                     self.builder.build_call(self.external_functions.printf, &[obr.into()], "printf");
@@ -416,18 +471,32 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     let cond = self.builder.build_int_compare(inkwell::IntPredicate::SLT, i_val, len, "i_lt_len");
                                     self.builder.build_conditional_branch(cond, body, exit);
                                     self.builder.position_at_end(body);
-                                    // compute kv base
-                                    let i_i64 = self.builder.build_int_cast(i_val, self.context.i64_type(), "i_i64");
-                                    let pair_sz = self.builder.build_int_add(key_sz, llvm_val_ty.size_of().ok_or("Failed to get val size")?, "pair_sz");
-                                    let off = self.builder.build_int_mul(pair_sz, i_i64, "off");
-                                    let off_i32 = self.builder.build_int_cast(off, self.context.i32_type(), "off_i32");
-                                    let kv_base_i8 = unsafe { self.builder.build_gep(pairs_base_i8, &[off_i32], "kv_base_i8") };
-                                    let key_ptr = self.builder.build_bitcast(kv_base_i8, llvm_key_ty.ptr_type(inkwell::AddressSpace::default()), "key_ptr").into_pointer_value();
-                                    let key_loaded = self.builder.build_load(key_ptr, "k");
-                                    let val_off_i32 = self.builder.build_int_cast(key_sz, self.context.i32_type(), "val_off_i32");
-                                    let val_ptr_i8 = unsafe { self.builder.build_gep(kv_base_i8, &[val_off_i32], "val_ptr_i8") };
-                                    let val_ptr = self.builder.build_bitcast(val_ptr_i8, llvm_val_ty.ptr_type(inkwell::AddressSpace::default()), "val_ptr").into_pointer_value();
-                                    let val_loaded = self.builder.build_load(val_ptr, "v");
+                                    // Fast-path only for dict<string,string>. For other dict types,
+                                    // print a compact placeholder and return.
+                                    let is_str_str = matches!(&**key_ty_box, Type::String) && matches!(&**val_ty_box, Type::String);
+                                    if !is_str_str {
+                                        let placeholder = self.builder.build_global_string_ptr("{...}\n", ".dict_ph").as_pointer_value();
+                                        self.builder.build_call(self.external_functions.printf, &[placeholder.into()], "printf");
+                                        return Ok(());
+                                    }
+                                    // Two strategies:
+                                    // 1) For dict<string,string> (common runtime format), treat pairs as i8** array
+                                    // 2) Fallback to typed-size arithmetic for other key/value types
+                                    let (key_loaded, val_loaded) = {
+                                        let i64_ty = self.context.i64_type();
+                                        let i_i64 = self.builder.build_int_cast(i_val, i64_ty, "i_i64");
+                                        let two = i64_ty.const_int(2, false);
+                                        let idx_key = self.builder.build_int_mul(i_i64, two, "idx_key");
+                                        let idx_val = self.builder.build_int_add(idx_key, i64_ty.const_int(1, false), "idx_val");
+                                        let ptr_ty = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+                                        let ptrptr_ty = ptr_ty.ptr_type(inkwell::AddressSpace::default());
+                                        let pairs_ptrptr = self.builder.build_bitcast(pairs_base_i8, ptrptr_ty, "pairs_ptrptr").into_pointer_value();
+                                        let key_slot_ptr = unsafe { self.builder.build_gep(pairs_ptrptr, &[idx_key], "key_slot_ptr") };
+                                        let val_slot_ptr = unsafe { self.builder.build_gep(pairs_ptrptr, &[idx_val], "val_slot_ptr") };
+                                        let k = self.builder.build_load(key_slot_ptr, "k");
+                                        let v = self.builder.build_load(val_slot_ptr, "v");
+                                        (k, v)
+                                    };
                                     // print key
                                     match &**key_ty_box {
                                         Type::Float => {

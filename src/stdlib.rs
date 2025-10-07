@@ -1,3 +1,14 @@
+//! Standard library integration.
+//!
+//! How to add a new std function (one place to change):
+//! 1) Add the function to `define_stdlib_functions!` with its C-level signature.
+//!    This exposes it to LLVM and provides helper lookups.
+//! 2) If the function is implemented natively in Rust (e.g., a shim), ensure the
+//!    symbol is registered in `codegen.rs` (native -> JIT mapping). If it's a C
+//!    or libc symbol, the declaration is sufficient and will be linked at runtime.
+//! 3) Calls appear in the AST as `Expr::FunctionCall { name, args }` with `name`
+//!    as a plain identifier. No lexer or parser changes are needed.
+//!
 use inkwell::context::Context;
 use inkwell::module::Module;
 use inkwell::values::FunctionValue;
@@ -56,35 +67,7 @@ macro_rules! stdlib_tokens {
     };
 }
 
-// Exported macro for generating stdlib token helper functions
-#[macro_export]
-macro_rules! stdlib_token_helpers {
-    () => {
-        impl Token {
-            /// Check if this token represents a standard library function
-            pub fn is_stdlib_function(&self) -> bool {
-                matches!(self, 
-                    Token::Printf | Token::Puts | Token::Malloc | Token::Free |
-                    Token::Abs | Token::Sqrt | Token::Pow
-                )
-            }
-
-            /// Get the function name as a string for stdlib functions
-            pub fn as_function_name(&self) -> Option<&'static str> {
-                match self {
-                    Token::Printf => Some("printf"),
-                    Token::Puts => Some("puts"),
-                    Token::Malloc => Some("malloc"),
-                    Token::Free => Some("free"),
-                    Token::Abs => Some("abs"),
-                    Token::Sqrt => Some("sqrt"),
-                    Token::Pow => Some("pow"),
-                    _ => None,
-                }
-            }
-        }
-    };
-}
+// No lexer coupling: std functions are regular identifiers in the parser.
 
 /// Comprehensive macro to define standard library functions with automatic lexer, parser, and codegen support
 macro_rules! define_stdlib_functions {
@@ -209,8 +192,7 @@ define_stdlib_functions! {
     "rand" => rand() -> i32,
     "srand" => srand(seed: i32) -> void,
     // networking shims (C ABI)
-    "http_get" => http_get(url: i8_ptr) -> i8_ptr,
-    "http_post" => http_post(url: i8_ptr, body: i8_ptr) -> i8_ptr,
+    "http_request" => http_request(method: i8_ptr, url: i8_ptr, headers_json: i8_ptr, body: i8_ptr) -> i8_ptr,
     "ws_connect" => ws_connect(url: i8_ptr) -> i32,
     "ws_send" => ws_send(handle: i32, msg: i8_ptr) -> i32,
     "ws_recv" => ws_recv(handle: i32) -> i8_ptr,
