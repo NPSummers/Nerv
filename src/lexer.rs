@@ -37,6 +37,8 @@ pub enum Token {
     Import,
     #[token("from")]
     From,
+    #[token("as")]
+    As,
     #[token("mutable")]
     Mutable,
     #[token("this")]
@@ -136,6 +138,8 @@ pub enum Token {
     RightShift,
 
     // Delimiters
+    #[token("::")]
+    DoubleColon,
     #[token("(")]
     LParen,
     #[token(")")]

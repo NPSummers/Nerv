@@ -16,7 +16,7 @@
 //! - Avoid panics in codegen paths; bubble up `Result` with context instead.
 //!
 use crate::ast::*;
-use crate::stdlib::{ExternalFunctions, builtin_lookup, BuiltinOp, get_function_signature};
+use crate::stdlib::{ExternalFunctions, builtin_lookup, BuiltinOp, get_function_signature, resolve_std_alias};
 // use inkwell::values::BasicValue; // not needed currently
 use inkwell::builder::Builder;
 use inkwell::context::Context;
@@ -80,6 +80,22 @@ impl StdFunctionRegistry {
                 fn nerv_spawn(func: *const i8) -> i32;
                 fn nerv_join(handle: i32) -> i32;
                 fn nerv_sleep(ms: i32);
+                fn nerv_chan_new() -> i32;
+                fn nerv_chan_send(handle: i32, msg: *const i8) -> i32;
+                fn nerv_chan_recv(handle: i32) -> *mut i8;
+                fn nerv_spawn_pool(size: i32) -> i32;
+                fn nerv_pool_exec(handle: i32, func: *const i8) -> i32;
+                fn nerv_pool_join(handle: i32) -> i32;
+                fn nerv_fs_read(path: *const i8) -> *mut i8;
+                fn nerv_fs_write(path: *const i8, contents: *const i8) -> i32;
+                fn nerv_fs_exists(path: *const i8) -> i32;
+                fn nerv_time_format(fmt: *const i8, epoch_secs: i64) -> *mut i8;
+                fn nerv_regex_is_match(pattern: *const i8, text: *const i8) -> i32;
+                fn nerv_sha256_hex(s: *const i8) -> *mut i8;
+                fn nerv_hmac_sha256_hex(key: *const i8, data: *const i8) -> *mut i8;
+                fn nerv_uuid_v4() -> *mut i8;
+                fn nerv_url_encode(s: *const i8) -> *mut i8;
+                fn nerv_url_decode(s: *const i8) -> *mut i8;
             }
             execution_engine.add_global_mapping(&ext.http_request, nerv_http_request as usize);
             execution_engine.add_global_mapping(&ext.ws_connect, nerv_ws_connect as usize);
@@ -91,6 +107,30 @@ impl StdFunctionRegistry {
             execution_engine.add_global_mapping(&ext.spawn, nerv_spawn as usize);
             execution_engine.add_global_mapping(&ext.join, nerv_join as usize);
             execution_engine.add_global_mapping(&ext.sleep, nerv_sleep as usize);
+            // channels
+            execution_engine.add_global_mapping(&ext.chan_new, nerv_chan_new as usize);
+            execution_engine.add_global_mapping(&ext.chan_send, nerv_chan_send as usize);
+            execution_engine.add_global_mapping(&ext.chan_recv, nerv_chan_recv as usize);
+            // pool
+            execution_engine.add_global_mapping(&ext.spawn_pool, nerv_spawn_pool as usize);
+            execution_engine.add_global_mapping(&ext.pool_exec, nerv_pool_exec as usize);
+            execution_engine.add_global_mapping(&ext.pool_join, nerv_pool_join as usize);
+            // fs
+            execution_engine.add_global_mapping(&ext.fs_read, nerv_fs_read as usize);
+            execution_engine.add_global_mapping(&ext.fs_write, nerv_fs_write as usize);
+            execution_engine.add_global_mapping(&ext.fs_exists, nerv_fs_exists as usize);
+            // time fmt
+            execution_engine.add_global_mapping(&ext.time_format, nerv_time_format as usize);
+            // regex
+            execution_engine.add_global_mapping(&ext.regex_is_match, nerv_regex_is_match as usize);
+            // crypto
+            execution_engine.add_global_mapping(&ext.sha256_hex, nerv_sha256_hex as usize);
+            execution_engine.add_global_mapping(&ext.hmac_sha256_hex, nerv_hmac_sha256_hex as usize);
+            // uuid
+            execution_engine.add_global_mapping(&ext.uuid_v4, nerv_uuid_v4 as usize);
+            // url
+            execution_engine.add_global_mapping(&ext.url_encode, nerv_url_encode as usize);
+            execution_engine.add_global_mapping(&ext.url_decode, nerv_url_decode as usize);
         }
     }
 }
@@ -108,6 +148,8 @@ pub struct CodeGenerator<'ctx> {
     user_function_signatures: HashMap<String, (Vec<Type>, Option<Type>)>,
     current_function_return_type: Option<Type>,
     argv_globals: Vec<inkwell::values::GlobalValue<'ctx>>,
+    global_values: HashMap<String, inkwell::values::GlobalValue<'ctx>>,
+    global_types: HashMap<String, Type>,
 }
 
 type MainFunc = unsafe extern "C" fn() -> i32;
@@ -136,6 +178,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             user_function_signatures: HashMap::new(),
             current_function_return_type: None,
             argv_globals: Vec::new(),
+            global_values: HashMap::new(),
+            global_types: HashMap::new(),
         };
         // Register native symbols (one place to update for new shims)
         StdFunctionRegistry::register_native_shims(&cg.execution_engine, &cg.external_functions);
@@ -183,9 +227,12 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     fn gen_program(&mut self, program: &Program) -> Result<(), String> {
-        // First pass: declare all classes and functions
+        // First pass: declare all classes, functions, and module-level globals
         for stmt in &program.body {
             match stmt {
+                Stmt::VarDecl(v) => {
+                    self.declare_global(v)?;
+                }
                 Stmt::ClassDecl(class_decl) => {
                     self.declare_class(class_decl)?;
                 }
@@ -195,41 +242,29 @@ impl<'ctx> CodeGenerator<'ctx> {
                 _ => {}
             }
         }
-
-        // Second pass: generate function bodies and class methods
+        // Second pass: generate function bodies
         for stmt in &program.body {
             match stmt {
-                Stmt::ClassDecl(class_decl) => {
-                    self.gen_class_methods(class_decl)?;
-                }
                 Stmt::FunctionDecl(func_decl) => {
                     self.gen_function_body(func_decl)?;
                 }
                 _ => {}
             }
         }
-
-        // Generate main function
+        // Generate main as before
         let i32_type = self.context.i32_type();
         let fn_type = i32_type.fn_type(&[], false);
         let main_function = self.module.add_function("main", fn_type, None);
         let basic_block = self.context.append_basic_block(main_function, "entry");
         self.builder.position_at_end(basic_block);
-
-        // Prepare argv as globals for builtin access
         self.materialize_process_args();
-
-        // Execute non-function and non-class statements in main
         for stmt in &program.body {
             if !matches!(stmt, Stmt::FunctionDecl(_) | Stmt::ClassDecl(_)) {
                 self.gen_stmt(stmt, main_function)?;
             }
         }
-        
-        // Always return 0 from main
         let zero = i32_type.const_int(0, false);
         self.builder.build_return(Some(&zero));
-
         Ok(())
     }
 
@@ -336,9 +371,22 @@ impl<'ctx> CodeGenerator<'ctx> {
                         if let Some((_params, ret_ty)) = get_function_signature(&func_call.name) {
                             if ret_ty == "i8_ptr" {
                                 let as_int = self.gen_function_call(func_call, function)?;
-                                let ptr = self.builder.build_int_to_ptr(as_int, self.context.i8_type().ptr_type(inkwell::AddressSpace::default()), "ret_ptr");
+                                let i8ptr_ty = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+                                let ptr = self.builder.build_int_to_ptr(as_int, i8ptr_ty, "ret_ptr");
+                                let is_null = self.builder.build_is_null(ptr, "ret_is_null");
+                                let then_bb = self.context.append_basic_block(function, "ret_null");
+                                let else_bb = self.context.append_basic_block(function, "ret_some");
+                                let cont_bb = self.context.append_basic_block(function, "ret_cont");
+                                self.builder.build_conditional_branch(is_null, then_bb, else_bb);
+                                self.builder.position_at_end(then_bb);
+                                let nl = self.builder.build_global_string_ptr("\n", ".nl").as_pointer_value();
+                                self.builder.build_call(self.external_functions.printf, &[nl.into()], "printf");
+                                self.builder.build_unconditional_branch(cont_bb);
+                                self.builder.position_at_end(else_bb);
                                 let format_str = self.builder.build_global_string_ptr("%s\n", ".str").as_pointer_value();
                                 self.builder.build_call(self.external_functions.printf, &[format_str.into(), ptr.into()], "printf_call");
+                                self.builder.build_unconditional_branch(cont_bb);
+                                self.builder.position_at_end(cont_bb);
                                 return Ok(());
                             }
                         }
@@ -381,8 +429,21 @@ impl<'ctx> CodeGenerator<'ctx> {
                             match var_type {
                                 Type::String => {
                                     if let Ok(basic_val) = self.gen_expr_for_print(expr, function) {
+                                        let ptr = basic_val.into_pointer_value();
+                                        let is_null = self.builder.build_is_null(ptr, "str_is_null");
+                                        let then_bb = self.context.append_basic_block(function, "str_null");
+                                        let else_bb = self.context.append_basic_block(function, "str_some");
+                                        let cont_bb = self.context.append_basic_block(function, "str_cont");
+                                        self.builder.build_conditional_branch(is_null, then_bb, else_bb);
+                                        self.builder.position_at_end(then_bb);
+                                        let nl = self.builder.build_global_string_ptr("\n", ".nl").as_pointer_value();
+                                        self.builder.build_call(self.external_functions.printf, &[nl.into()], "printf");
+                                        self.builder.build_unconditional_branch(cont_bb);
+                                        self.builder.position_at_end(else_bb);
                                         let format_str = self.builder.build_global_string_ptr("%s\n", ".str").as_pointer_value();
-                                        self.builder.build_call(self.external_functions.printf, &[format_str.into(), basic_val.into()], "printf_call");
+                                        self.builder.build_call(self.external_functions.printf, &[format_str.into(), ptr.into()], "printf_call");
+                                        self.builder.build_unconditional_branch(cont_bb);
+                                        self.builder.position_at_end(cont_bb);
                                     }
                                 },
                                 Type::List(elem_ty_box) => {
@@ -456,6 +517,19 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 Type::Dict(key_ty_box, val_ty_box) => {
                                     let (var_ptr, _vt) = self.named_values.get(name).unwrap();
                                     let base_i8 = self.builder.build_load(*var_ptr, name).into_pointer_value();
+                                    // null check: if dict pointer is null, print empty and skip
+                                    let is_null = self.builder.build_is_null(base_i8, "d_is_null");
+                                    let null_bb = self.context.append_basic_block(function, "pd_null");
+                                    let nonnull_bb = self.context.append_basic_block(function, "pd_nonnull");
+                                    let after_bb = self.context.append_basic_block(function, "pd_after");
+                                    self.builder.build_conditional_branch(is_null, null_bb, nonnull_bb);
+                                    // null path
+                                    self.builder.position_at_end(null_bb);
+                                    let empty = self.builder.build_global_string_ptr("{}\n", ".empty_dict").as_pointer_value();
+                                    self.builder.build_call(self.external_functions.printf, &[empty.into()], "printf");
+                                    self.builder.build_unconditional_branch(after_bb);
+                                    // non-null path
+                                    self.builder.position_at_end(nonnull_bb);
                                     // len and pairs base
                                     let len_ptr_i8 = unsafe { self.builder.build_gep(base_i8, &[self.context.i32_type().const_int(0, false)], "d_len_ptr_i8") };
                                     let len_ptr = self.builder.build_bitcast(len_ptr_i8, self.context.i32_type().ptr_type(inkwell::AddressSpace::default()), "d_len_ptr").into_pointer_value();
@@ -562,6 +636,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     self.builder.position_at_end(exit);
                                     let cbrn = self.builder.build_global_string_ptr("}\n", ".cbrn").as_pointer_value();
                                     self.builder.build_call(self.external_functions.printf, &[cbrn.into()], "printf");
+                                    // join
+                                    self.builder.build_unconditional_branch(after_bb);
+                                    self.builder.position_at_end(after_bb);
                                 }
                                 Type::Float => {
                                     if let Ok(basic_val) = self.gen_expr_for_print(expr, function) {
@@ -630,6 +707,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
             }
             Stmt::VarDecl(var_decl) => {
+                // If a top-level var has initializer, store it into the global
+                if let Some(init) = &var_decl.initializer {
+                    let gptr_opt = self.global_values.get(&var_decl.name).map(|gv| gv.as_pointer_value());
+                    let ty = self.global_types.get(&var_decl.name).cloned().unwrap_or(Type::Int);
+                    if let Some(gptr) = gptr_opt {
+                        let val = self.gen_expr_typed(init, function, &ty)?;
+                        self.builder.build_store(gptr, val);
+                    }
+                }
                 let var_type = var_decl.type_annotation.clone().unwrap_or_else(|| {
                     // Infer type from initializer if no explicit type
                     if let Some(initializer) = &var_decl.initializer {
@@ -649,10 +735,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                     // call it and store the pointer directly to avoid int truncation.
                     if matches!(var_type, Type::String | Type::List(_) | Type::Dict(_, _)) {
                         if let Expr::FunctionCall(fc) = initializer {
-                            if let Some((param_types, ret_ty)) = get_function_signature(&fc.name) {
+                            let lookup_name = resolve_std_alias(&fc.name).unwrap_or(&fc.name);
+                            if let Some((param_types, ret_ty)) = get_function_signature(lookup_name) {
                                 if ret_ty == "i8_ptr" {
                                     // Prepare args per signature
-                                    let stdlib_func = self.external_functions.get_function_by_name(&fc.name)
+                                    let stdlib_func = self.external_functions.get_function_by_name(lookup_name)
                                         .ok_or_else(|| format!("Unknown function: {}", fc.name))?;
                                     let mut args = Vec::new();
                                     for (idx, arg_expr) in fc.args.iter().enumerate() {
@@ -875,28 +962,44 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
             }
             Expr::Identifier(name) => {
-                let (var_ptr, var_type) = self.named_values.get(name).ok_or("Unknown variable")?;
-                let loaded_val = self.builder.build_load(*var_ptr, name);
-                // For now, convert everything to int for compatibility
-                match var_type {
-                    Type::String => {
-                        let ptr_val = loaded_val.into_pointer_value();
-                        Ok(self.builder.build_ptr_to_int(ptr_val, self.context.i32_type(), "str_to_int"))
-                    },
-                    Type::Float => {
-                        let float_val = loaded_val.into_float_value();
-                        Ok(self.builder.build_float_to_signed_int(float_val, self.context.i32_type(), "float_to_int"))
-                    },
-                    Type::List(_) | Type::Dict(_, _) => {
-                        let ptr_val = loaded_val.into_pointer_value();
-                        Ok(self.builder.build_ptr_to_int(ptr_val, self.context.i32_type(), "coll_ptr_to_int"))
-                    },
-                    Type::Custom(_) => {
-                        // For object types, convert pointer to int for expressions
-                        let ptr_val = loaded_val.into_pointer_value();
-                        Ok(self.builder.build_ptr_to_int(ptr_val, self.context.i32_type(), "obj_to_int"))
-                    },
-                    _ => Ok(loaded_val.into_int_value())
+                if let Some((var_ptr, var_type)) = self.named_values.get(name) {
+                    let loaded_val = self.builder.build_load(*var_ptr, name);
+                    match var_type {
+                        Type::String => {
+                            let ptr_val = loaded_val.into_pointer_value();
+                            Ok(self.builder.build_ptr_to_int(ptr_val, self.context.i32_type(), "str_to_int"))
+                        },
+                        Type::Float => {
+                            let float_val = loaded_val.into_float_value();
+                            Ok(self.builder.build_float_to_signed_int(float_val, self.context.i32_type(), "float_to_int"))
+                        },
+                        Type::List(_) | Type::Dict(_, _) => {
+                            let ptr_val = loaded_val.into_pointer_value();
+                            Ok(self.builder.build_ptr_to_int(ptr_val, self.context.i32_type(), "coll_ptr_to_int"))
+                        },
+                        Type::Custom(_) => {
+                            let ptr_val = loaded_val.into_pointer_value();
+                            Ok(self.builder.build_ptr_to_int(ptr_val, self.context.i32_type(), "obj_to_int"))
+                        },
+                        _ => Ok(loaded_val.into_int_value())
+                    }
+                } else if let Some(gv) = self.global_values.get(name) {
+                    // Load from module global
+                    let ty = self.global_types.get(name).cloned().unwrap_or(Type::Int);
+                    let loaded_val = self.builder.build_load(gv.as_pointer_value(), name);
+                    match ty {
+                        Type::String | Type::List(_) | Type::Dict(_, _) | Type::Custom(_) => {
+                            let ptr_val = loaded_val.into_pointer_value();
+                            Ok(self.builder.build_ptr_to_int(ptr_val, self.context.i32_type(), "glob_ptr_to_int"))
+                        }
+                        Type::Float => {
+                            let float_val = loaded_val.into_float_value();
+                            Ok(self.builder.build_float_to_signed_int(float_val, self.context.i32_type(), "glob_float_to_int"))
+                        }
+                        _ => Ok(loaded_val.into_int_value())
+                    }
+                } else {
+                    Err("Unknown variable".to_string())
                 }
             }
             Expr::FunctionCall(func_call) => {
@@ -906,7 +1009,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let value = self.gen_expr(&assignment.value, function)?;
                 if let Some((var_ptr, _var_type)) = self.named_values.get(&assignment.target) {
                     self.builder.build_store(*var_ptr, value);
-                    Ok(value) // Return the assigned value
+                    Ok(value)
+                } else if let Some(gv) = self.global_values.get(&assignment.target) {
+                    let gptr = gv.as_pointer_value();
+                    self.builder.build_store(gptr, value);
+                    Ok(value)
                 } else {
                     Err(format!("Undefined variable: {}", assignment.target))
                 }
@@ -1210,13 +1317,16 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         }
 
+        // Map namespaced aliases to flat stdlib names if present
+        let lookup_name = resolve_std_alias(&func_call.name).unwrap_or(&func_call.name);
+
         // Get the function from our stdlib functions
-        let stdlib_func = self.external_functions.get_function_by_name(&func_call.name)
+        let stdlib_func = self.external_functions.get_function_by_name(lookup_name)
             .ok_or_else(|| format!("Unknown function: {}", func_call.name))?;
 
         // If we know the signature, coerce arguments accordingly
         let mut args: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
-        if let Some((param_types, ret_ty)) = get_function_signature(&func_call.name) {
+        if let Some((param_types, ret_ty)) = get_function_signature(lookup_name) {
             for (idx, arg_expr) in func_call.args.iter().enumerate() {
                 let expected = param_types.get(idx).copied().unwrap_or("i32");
                 match expected {
@@ -1233,8 +1343,36 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     let i8ptr_ty = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
                                     let cast_ptr = self.builder.build_bitcast(fn_ptr, i8ptr_ty, "fnptr_to_i8ptr");
                                     args.push(cast_ptr.into());
+                                } else if let Some((var_ptr, var_ty)) = self.named_values.get(name) {
+                                    // Directly load pointer-typed variables without int truncation
+                                    match var_ty {
+                                        Type::String | Type::List(_) | Type::Dict(_, _) | Type::Custom(_) => {
+                                            let loaded = self.builder.build_load(*var_ptr, name).into_pointer_value();
+                                            args.push(loaded.into());
+                                        }
+                                        _ => {
+                                            let int_val = self.gen_expr(arg_expr, _function)?;
+                                            let ptr_ty = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+                                            let ptr = self.builder.build_int_to_ptr(int_val, ptr_ty, "int_to_ptr");
+                                            args.push(ptr.into());
+                                        }
+                                    }
+                                } else if let Some(gv) = self.global_values.get(name) {
+                                    let ty = self.global_types.get(name).cloned().unwrap_or(Type::Int);
+                                    let loaded = self.builder.build_load(gv.as_pointer_value(), name);
+                                    match ty {
+                                        Type::String | Type::List(_) | Type::Dict(_, _) | Type::Custom(_) => {
+                                            args.push(loaded.into_pointer_value().into());
+                                        }
+                                        _ => {
+                                            let int_val = loaded.into_int_value();
+                                            let ptr_ty = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+                                            let ptr = self.builder.build_int_to_ptr(int_val, ptr_ty, "int_to_ptr");
+                                            args.push(ptr.into());
+                                        }
+                                    }
                                 } else {
-                                    // Fallback: treat as integer expression and cast to pointer
+                                    // Fallback: integer to pointer
                                     let int_val = self.gen_expr(arg_expr, _function)?;
                                     let ptr_ty = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
                                     let ptr = self.builder.build_int_to_ptr(int_val, ptr_ty, "int_to_ptr");
@@ -1281,6 +1419,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             return Ok(match ret_ty {
                 "void" => self.context.i32_type().const_int(0, false),
                 "i32" => call_result.try_as_basic_value().left().unwrap().into_int_value(),
+                "i64" => {
+                    let v = call_result.try_as_basic_value().left().unwrap().into_int_value();
+                    self.builder.build_int_truncate_or_bit_cast(v, self.context.i32_type(), "i64_to_i32")
+                }
                 "i8_ptr" => {
                     let ptr = call_result.try_as_basic_value().left().unwrap().into_pointer_value();
                     self.builder.build_ptr_to_int(ptr, self.context.i32_type(), "ptr_to_int_ret")
@@ -2669,5 +2811,24 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             _ => Err("Complex member access not yet implemented".to_string())
         }
+    }
+
+    fn declare_global(&mut self, var_decl: &VarDeclStmt) -> Result<(), String> {
+        // Only declare pointer-sized globals for String/List/Dict and i32 for others for now
+        let ty = var_decl.type_annotation.clone().unwrap_or_else(|| {
+            if let Some(init) = &var_decl.initializer { self.infer_type_from_expr(init) } else { Type::Int }
+        });
+        let llvm_ty = self.get_llvm_type(&ty)?;
+        let gv = self.module.add_global(llvm_ty, None, &format!(".g_{}", var_decl.name));
+        // zero init
+        match llvm_ty {
+            inkwell::types::BasicTypeEnum::IntType(it) => gv.set_initializer(&it.const_int(0, false)),
+            inkwell::types::BasicTypeEnum::FloatType(ft) => gv.set_initializer(&ft.const_float(0.0)),
+            inkwell::types::BasicTypeEnum::PointerType(pt) => gv.set_initializer(&pt.const_null()),
+            _ => {}
+        }
+        self.global_values.insert(var_decl.name.clone(), gv);
+        self.global_types.insert(var_decl.name.clone(), ty);
+        Ok(())
     }
 }

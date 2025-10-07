@@ -1,0 +1,31 @@
+import nerv::std;
+import nerv::std::sync::chan as chan;
+import nerv::std::threadpool as pool;
+
+# Global channel handle to share with worker task
+plug GCH: int;
+
+plug producer(): int {
+  chan::send(GCH, "hello from pool");
+  chan::send(GCH, "work done");
+  return 0;
+}
+
+plug main(): int {
+  # create channel
+  GCH = chan::new();
+
+  # start a small pool and schedule producer
+  plug p = pool::spawn(2);
+  pool::exec(p, producer);
+  pool::join(p);
+
+  # receive messages
+  plug m1: string = chan::recv(GCH);
+  print(m1);
+  plug m2: string = chan::recv(GCH);
+  print(m2);
+  return 0;
+}
+
+

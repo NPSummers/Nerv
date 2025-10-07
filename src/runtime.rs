@@ -5,9 +5,11 @@
 
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{mpsc, Mutex};
 use std::thread;
 use std::time::Duration;
+use std::fs;
+// use std::io::Read as _; // not currently needed
 
 // ---- FFI helpers ----
 
@@ -218,6 +220,116 @@ pub extern "C" fn nerv_sleep(ms: i32) {
     thread::sleep(dur);
 }
 
+// ---- Filesystem / Process / Utilities ----
+
+#[no_mangle]
+pub extern "C" fn nerv_fs_read(path: *const i8) -> *mut i8 {
+    if path.is_null() { return std::ptr::null_mut(); }
+    let p = unsafe { std::ffi::CStr::from_ptr(path) }.to_string_lossy().to_string();
+    match fs::read_to_string(&p) {
+        Ok(s) => match std::ffi::CString::new(s) {
+            Ok(c) => c.into_raw(),
+            Err(_) => std::ffi::CString::new("").unwrap().into_raw(),
+        },
+        Err(_) => std::ffi::CString::new("").unwrap().into_raw(),
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn nerv_fs_write(path: *const i8, contents: *const i8) -> i32 {
+    if path.is_null() || contents.is_null() { return -1; }
+    let p = unsafe { std::ffi::CStr::from_ptr(path) }.to_string_lossy().to_string();
+    let c = unsafe { std::ffi::CStr::from_ptr(contents) }.to_string_lossy().to_string();
+    match fs::write(&p, c) { Ok(_) => 0, Err(_) => -1 }
+}
+
+#[no_mangle]
+pub extern "C" fn nerv_fs_exists(path: *const i8) -> i32 {
+    if path.is_null() { return 0; }
+    let p = unsafe { std::ffi::CStr::from_ptr(path) }.to_string_lossy().to_string();
+    if std::path::Path::new(&p).exists() { 1 } else { 0 }
+}
+
+// ---- Time/Date formatting ----
+
+#[no_mangle]
+pub extern "C" fn nerv_time_format(fmt: *const i8, epoch_secs: i64) -> *mut i8 {
+    if fmt.is_null() { return std::ptr::null_mut(); }
+    let fmt_s = unsafe { std::ffi::CStr::from_ptr(fmt) }.to_string_lossy().to_string();
+    let dt = chrono::NaiveDateTime::from_timestamp_opt(epoch_secs, 0);
+    match dt {
+        Some(t) => to_c_string_owned(t.format(&fmt_s).to_string()),
+        None => std::ptr::null_mut(),
+    }
+}
+
+// ---- Regex ----
+
+#[no_mangle]
+pub extern "C" fn nerv_regex_is_match(pattern: *const i8, text: *const i8) -> i32 {
+    if pattern.is_null() || text.is_null() { return 0; }
+    let pat = unsafe { std::ffi::CStr::from_ptr(pattern) }.to_string_lossy().to_string();
+    let txt = unsafe { std::ffi::CStr::from_ptr(text) }.to_string_lossy().to_string();
+    match regex::Regex::new(&pat) {
+        Ok(re) => if re.is_match(&txt) { 1 } else { 0 },
+        Err(_) => 0,
+    }
+}
+
+// ---- Crypto (hash/HMAC) ----
+
+#[no_mangle]
+pub extern "C" fn nerv_sha256_hex(s: *const i8) -> *mut i8 {
+    if s.is_null() { return std::ptr::null_mut(); }
+    let raw = unsafe { std::ffi::CStr::from_ptr(s) }.to_string_lossy().as_bytes().to_vec();
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(&raw);
+    let out = hasher.finalize();
+    to_c_string_owned(hex::encode(out))
+}
+
+#[no_mangle]
+pub extern "C" fn nerv_hmac_sha256_hex(key: *const i8, data: *const i8) -> *mut i8 {
+    if key.is_null() || data.is_null() { return std::ptr::null_mut(); }
+    let key_b = unsafe { std::ffi::CStr::from_ptr(key) }.to_bytes().to_vec();
+    let data_b = unsafe { std::ffi::CStr::from_ptr(data) }.to_bytes().to_vec();
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+    let mut mac = match Hmac::<Sha256>::new_from_slice(&key_b) {
+        Ok(m) => m,
+        Err(_) => return std::ptr::null_mut(),
+    };
+    mac.update(&data_b);
+    let out = mac.finalize().into_bytes();
+    to_c_string_owned(hex::encode(out))
+}
+
+// ---- UUID ----
+
+#[no_mangle]
+pub extern "C" fn nerv_uuid_v4() -> *mut i8 {
+    to_c_string_owned(uuid::Uuid::new_v4().to_string())
+}
+
+// ---- URL helpers ----
+
+#[no_mangle]
+pub extern "C" fn nerv_url_encode(s: *const i8) -> *mut i8 {
+    if s.is_null() { return std::ptr::null_mut(); }
+    let raw = unsafe { std::ffi::CStr::from_ptr(s) }.to_string_lossy().to_string();
+    to_c_string_owned(urlencoding::encode(&raw).into_owned())
+}
+
+#[no_mangle]
+pub extern "C" fn nerv_url_decode(s: *const i8) -> *mut i8 {
+    if s.is_null() { return std::ptr::null_mut(); }
+    let raw = unsafe { std::ffi::CStr::from_ptr(s) }.to_string_lossy().to_string();
+    match urlencoding::decode(&raw) {
+        Ok(cow) => to_c_string_owned(cow.into_owned()),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
 #[no_mangle]
 pub extern "C" fn nerv_join(handle: i32) -> i32 {
     let mut reg = THREAD_REG.lock().unwrap();
@@ -228,5 +340,107 @@ pub extern "C" fn nerv_join(handle: i32) -> i32 {
         },
         None => -1,
     }
+}
+
+// ---- Channels (MPSC, string messages) ----
+
+struct ChanPair {
+    tx: mpsc::Sender<String>,
+    rx: mpsc::Receiver<String>,
+}
+
+static CHAN_REG: Lazy<Mutex<HashMap<i32, ChanPair>>> = Lazy::new(|| Mutex::new(HashMap::new()));
+static NEXT_CHAN_ID: Lazy<Mutex<i32>> = Lazy::new(|| Mutex::new(1));
+
+#[no_mangle]
+pub extern "C" fn nerv_chan_new() -> i32 {
+    let (tx, rx) = mpsc::channel::<String>();
+    let mut id_guard = NEXT_CHAN_ID.lock().unwrap();
+    let id = *id_guard;
+    *id_guard += 1;
+    CHAN_REG.lock().unwrap().insert(id, ChanPair { tx, rx });
+    id
+}
+
+#[no_mangle]
+pub extern "C" fn nerv_chan_send(handle: i32, msg: *const i8) -> i32 {
+    let msg_s = if msg.is_null() { String::new() } else { unsafe { std::ffi::CStr::from_ptr(msg) }.to_string_lossy().to_string() };
+    let reg = CHAN_REG.lock().unwrap();
+    let Some(pair) = reg.get(&handle) else { return -1; };
+    match pair.tx.send(msg_s) {
+        Ok(_) => 0,
+        Err(_) => -1,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn nerv_chan_recv(handle: i32) -> *mut i8 {
+    let reg = CHAN_REG.lock().unwrap();
+    let Some(pair) = reg.get(&handle) else { return std::ptr::null_mut(); };
+    match pair.rx.recv() {
+        Ok(s) => to_c_string_owned(s),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+// ---- Thread pool ----
+
+enum PoolMsg {
+    Job(extern "C" fn() -> i32),
+    Shutdown,
+}
+
+struct ThreadPool {
+    tx: mpsc::Sender<PoolMsg>,
+    workers: Vec<thread::JoinHandle<()>>,
+}
+
+static POOL_REG: Lazy<Mutex<HashMap<i32, ThreadPool>>> = Lazy::new(|| Mutex::new(HashMap::new()));
+static NEXT_POOL_ID: Lazy<Mutex<i32>> = Lazy::new(|| Mutex::new(1));
+
+#[no_mangle]
+pub extern "C" fn nerv_spawn_pool(size: i32) -> i32 {
+    let n = if size <= 0 { 1 } else { size as usize };
+    let (tx, rx) = mpsc::channel::<PoolMsg>();
+    let rx = std::sync::Arc::new(Mutex::new(rx));
+    let mut workers = Vec::with_capacity(n);
+    for _ in 0..n {
+        let rx_cloned = rx.clone();
+        let h = thread::spawn(move || loop {
+            let msg_opt = { rx_cloned.lock().unwrap().recv().ok() };
+            match msg_opt {
+                Some(PoolMsg::Job(f)) => { let _ = f(); }
+                Some(PoolMsg::Shutdown) | None => break,
+            }
+        });
+        workers.push(h);
+    }
+    let mut id_guard = NEXT_POOL_ID.lock().unwrap();
+    let id = *id_guard; *id_guard += 1;
+    POOL_REG.lock().unwrap().insert(id, ThreadPool { tx, workers });
+    id
+}
+
+#[no_mangle]
+pub extern "C" fn nerv_pool_exec(handle: i32, func: *const i8) -> i32 {
+    if func.is_null() { return -1; }
+    let f: extern "C" fn() -> i32 = unsafe { std::mem::transmute(func) };
+    let reg = POOL_REG.lock().unwrap();
+    let Some(pool) = reg.get(&handle) else { return -1; };
+    match pool.tx.send(PoolMsg::Job(f)) {
+        Ok(_) => 0,
+        Err(_) => -1,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn nerv_pool_join(handle: i32) -> i32 {
+    let mut reg = POOL_REG.lock().unwrap();
+    let Some(mut pool) = reg.remove(&handle) else { return -1; };
+    // signal shutdown to each worker
+    for _ in 0..pool.workers.len() { let _ = pool.tx.send(PoolMsg::Shutdown); }
+    let mut ok = true;
+    for h in pool.workers.drain(..) { if h.join().is_err() { ok = false; } }
+    if ok { 0 } else { -1 }
 }
 

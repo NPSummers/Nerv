@@ -118,6 +118,7 @@ macro_rules! define_stdlib_functions {
                 for param_type in param_types {
                     let llvm_type = match *param_type {
                         "i32" => context.i32_type().into(),
+                        "i64" => context.i64_type().into(),
                         "i8_ptr" => context.i8_type().ptr_type(AddressSpace::default()).into(),
                         "f64" => context.f64_type().into(),
                         "bool" => context.bool_type().into(),
@@ -130,6 +131,7 @@ macro_rules! define_stdlib_functions {
                 
                 let fn_type = match return_type {
                     "i32" => context.i32_type().fn_type(&llvm_param_types, is_variadic),
+                    "i64" => context.i64_type().fn_type(&llvm_param_types, is_variadic),
                     "void" => context.void_type().fn_type(&llvm_param_types, is_variadic),
                     "f64" => context.f64_type().fn_type(&llvm_param_types, is_variadic),
                     "bool" => context.bool_type().fn_type(&llvm_param_types, is_variadic),
@@ -185,7 +187,7 @@ define_stdlib_functions! {
     "fread" => fread(ptr: i8_ptr, size: i32, nmemb: i32, stream: i8_ptr) -> i32,
     "fwrite" => fwrite(ptr: i8_ptr, size: i32, nmemb: i32, stream: i8_ptr) -> i32,
     // time
-    "time" => time(tloc: i8_ptr) -> i32,
+    "time" => time(tloc: i8_ptr) -> i64,
     // env
     "getenv" => getenv(name: i8_ptr) -> i8_ptr,
     // random
@@ -205,6 +207,84 @@ define_stdlib_functions! {
     // threading
     "spawn" => spawn(func: i8_ptr) -> i32,
     "join" => join(handle: i32) -> i32,
+    // channels
+    "chan_new" => chan_new() -> i32,
+    "chan_send" => chan_send(handle: i32, msg: i8_ptr) -> i32,
+    "chan_recv" => chan_recv(handle: i32) -> i8_ptr,
+    // thread pool
+    "spawn_pool" => spawn_pool(size: i32) -> i32,
+    "pool_exec" => pool_exec(handle: i32, func: i8_ptr) -> i32,
+    "pool_join" => pool_join(handle: i32) -> i32,
+    // filesystem
+    "fs_read" => fs_read(path: i8_ptr) -> i8_ptr,
+    "fs_write" => fs_write(path: i8_ptr, contents: i8_ptr) -> i32,
+    "fs_exists" => fs_exists(path: i8_ptr) -> i32,
+    // time formatting
+    "time_format" => time_format(fmt: i8_ptr, epoch_secs: i64) -> i8_ptr,
+    // regex
+    "regex_is_match" => regex_is_match(pattern: i8_ptr, text: i8_ptr) -> i32,
+    // crypto
+    "sha256_hex" => sha256_hex(s: i8_ptr) -> i8_ptr,
+    "hmac_sha256_hex" => hmac_sha256_hex(key: i8_ptr, data: i8_ptr) -> i8_ptr,
+    // uuid
+    "uuid_v4" => uuid_v4() -> i8_ptr,
+    // url
+    "url_encode" => url_encode(s: i8_ptr) -> i8_ptr,
+    "url_decode" => url_decode(s: i8_ptr) -> i8_ptr,
     // timing
     "sleep" => sleep(ms: i32) -> void,
+}
+
+// Map namespaced aliases like nerv::std::http::request -> http_request, etc.
+pub fn resolve_std_alias(name: &str) -> Option<&'static str> {
+    match name {
+        // http
+        "nerv::std::http::request" => Some("http_request"),
+        // random
+        "nerv::std::random::rand" => Some("rand"),
+        "nerv::std::random::srand" => Some("srand"),
+        // websocket
+        "nerv::std::ws::connect" => Some("ws_connect"),
+        "nerv::std::ws::send" => Some("ws_send"),
+        "nerv::std::ws::recv" => Some("ws_recv"),
+        "nerv::std::ws::close" => Some("ws_close"),
+        // json
+        "nerv::std::json::pretty" => Some("json_pretty"),
+        "nerv::std::json::to_dict" => Some("json_to_dict_ss"),
+        // threading
+        "nerv::std::thread::spawn" => Some("spawn"),
+        "nerv::std::thread::join" => Some("join"),
+        // channels
+        "nerv::std::sync::chan::new" => Some("chan_new"),
+        "nerv::std::sync::chan::send" => Some("chan_send"),
+        "nerv::std::sync::chan::recv" => Some("chan_recv"),
+        // pool
+        "nerv::std::threadpool::spawn" => Some("spawn_pool"),
+        "nerv::std::threadpool::exec" => Some("pool_exec"),
+        "nerv::std::threadpool::join" => Some("pool_join"),
+        // time
+        "nerv::std::time::time" => Some("time"),
+        "nerv::std::time::sleep" => Some("sleep"),
+        // env
+        "nerv::std::env::get" => Some("getenv"),
+        // libc-ish basics
+        "nerv::std::io::puts" => Some("puts"),
+        // fs
+        "nerv::std::fs::read" => Some("fs_read"),
+        "nerv::std::fs::write" => Some("fs_write"),
+        "nerv::std::fs::exists" => Some("fs_exists"),
+        // time fmt
+        "nerv::std::time::format" => Some("time_format"),
+        // regex
+        "nerv::std::regex::is_match" => Some("regex_is_match"),
+        // crypto
+        "nerv::std::crypto::sha256_hex" => Some("sha256_hex"),
+        "nerv::std::crypto::hmac_sha256_hex" => Some("hmac_sha256_hex"),
+        // uuid
+        "nerv::std::uuid::v4" => Some("uuid_v4"),
+        // url
+        "nerv::std::url::encode" => Some("url_encode"),
+        "nerv::std::url::decode" => Some("url_decode"),
+        _ => None,
+    }
 }

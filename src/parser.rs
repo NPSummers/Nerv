@@ -371,7 +371,7 @@ impl<'a> Parser<'a> {
             Token::Char(c) => Ok(Expr::Literal(LiteralExpr::Char(c))),
             Token::True => Ok(Expr::Literal(LiteralExpr::Bool(true))),
             Token::False => Ok(Expr::Literal(LiteralExpr::Bool(false))),
-            Token::Identifier(name) => self.parse_identifier_or_function_call(name),
+            Token::Identifier(name) => self.parse_identifier_or_function_call_qualified(name),
             Token::This => Ok(Expr::Identifier("this".to_string())),
             Token::Minus => {
                 let operand = self.parse_expression(4)?; // High precedence for unary minus
@@ -411,15 +411,12 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_identifier_or_function_call(&mut self, name: String) -> Result<Expr, String> {
-        // Check if this is followed by a parenthesis (function call or object instantiation)
+    fn parse_identifier_or_function_call_qualified(&mut self, name: String) -> Result<Expr, String> {
+        let full_name = self.consume_qualified_suffix(name)?;
         if let Some(Token::LParen) = self.peek() {
-            // For now, we'll determine if it's a class instantiation during semantic analysis
-            // In the parser, we'll treat class instantiation as function calls
-            // and distinguish them in the codegen phase
-            self.parse_function_call_or_instantiation(name)
+            self.parse_function_call_or_instantiation(full_name)
         } else {
-            Ok(Expr::Identifier(name))
+            Ok(Expr::Identifier(full_name))
         }
     }
 
@@ -469,6 +466,16 @@ impl<'a> Parser<'a> {
         // For now, return as FunctionCall and we'll distinguish in codegen
         // based on whether the name refers to a class or function
         Ok(Expr::FunctionCall(FunctionCallExpr { name, args }))
+    }
+
+    fn consume_qualified_suffix(&mut self, mut base: String) -> Result<String, String> {
+        while matches!(self.peek(), Some(Token::DoubleColon)) {
+            self.consume(Token::DoubleColon)?;
+            let seg = self.consume_identifier()?;
+            base.push_str("::");
+            base.push_str(&seg);
+        }
+        Ok(base)
     }
 
     fn get_peek_precedence(&mut self) -> u8 {
@@ -831,18 +838,21 @@ impl<'a> Parser<'a> {
     fn parse_import_statement(&mut self) -> Result<Stmt, String> {
         self.consume(Token::Import)?;
         let module = if let Some(Token::Identifier(name)) = self.next() {
-            name
+            self.consume_qualified_suffix(name)?
         } else {
             return Err("Expected module name after 'import'".to_string());
         };
+        let alias = if self.maybe_consume(Token::As) {
+            Some(self.consume_identifier()?)
+        } else { None };
         self.consume(Token::Semicolon)?;
-        Ok(Stmt::Import(ImportStmt { module, items: None }))
+        Ok(Stmt::Import(ImportStmt { module, items: None, alias }))
     }
 
     fn parse_from_import_statement(&mut self) -> Result<Stmt, String> {
         self.consume(Token::From)?;
         let module = if let Some(Token::Identifier(name)) = self.next() {
-            name
+            self.consume_qualified_suffix(name)?
         } else {
             return Err("Expected module name after 'from'".to_string());
         };
@@ -864,7 +874,7 @@ impl<'a> Parser<'a> {
         }
         
         self.consume(Token::Semicolon)?;
-        Ok(Stmt::Import(ImportStmt { module, items: Some(items) }))
+        Ok(Stmt::Import(ImportStmt { module, items: Some(items), alias: None }))
     }
 
     fn parse_class_statement(&mut self) -> Result<Stmt, String> {

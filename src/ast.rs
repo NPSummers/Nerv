@@ -178,6 +178,7 @@ pub struct ForStmt {
 pub struct ImportStmt {
     pub module: String,
     pub items: Option<Vec<String>>, // None for "import module", Some(vec) for "from module import items"
+    pub alias: Option<String>,
 }
 
 #[derive(Debug, PartialEq, Clone)]

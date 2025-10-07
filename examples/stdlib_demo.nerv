@@ -1,18 +1,21 @@
+import nerv::std;
+import nerv::std::random as random;
+
 plug main(): int {
-    plug now: int = time(0);
+    plug now: int = nerv::std::time::time(0);
     print(now);
 
-    plug home: string = getenv("HOME");
+    plug home: string = nerv::std::env::get("HOME");
     print(home);
 
-    srand(1234);
-    plug r: int = rand();
+    random::srand(1234);
+    plug r: int = random::rand();
     print(r);
     # Networking examples
-    # http_request(method, url, headers_json, body)
-    plug body: dict<string, string> = http_request("GET", "https://httpbin.org/get", "{}", "");
+    # request(method, url, headers_json, body)
+    plug body: dict<string, string> = nerv::std::http::request("GET", "https://httpbin.org/get", "{}", "");
     print(body);
-    plug resp: dict<string, string> = http_request("POST", "https://httpbin.org/post", "{\"Content-Type\":\"text/plain\"}", "hi");
+    plug resp: dict<string, string> = nerv::std::http::request("POST", "https://httpbin.org/post", "{\"Content-Type\":\"text/plain\"}", "hi");
     print(resp);
     return 0;
 }

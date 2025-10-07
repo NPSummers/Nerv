@@ -1,14 +1,16 @@
+import nerv::std;
+
 plug worker(): Int {
   print("start");
-  sleep(500);
+  nerv::std::time::sleep(500);
   print("end");
   return 0;
 }
 
 plug main(): Int {
-  plug h = spawn(worker);
-  sleep(100);
+  plug h = nerv::std::thread::spawn(worker);
+  nerv::std::time::sleep(100);
   print("main after 100ms");
-  join(h);
+  nerv::std::thread::join(h);
   return 0;
 }
