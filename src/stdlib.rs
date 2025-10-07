@@ -202,4 +202,9 @@ define_stdlib_functions! {
     "json_to_dict_ss" => json_to_dict_ss(s: i8_ptr) -> i8_ptr,
     // libc helpers
     "strcmp" => strcmp(a: i8_ptr, b: i8_ptr) -> i32,
+    // threading
+    "spawn" => spawn(func: i8_ptr) -> i32,
+    "join" => join(handle: i32) -> i32,
+    // timing
+    "sleep" => sleep(ms: i32) -> void,
 }

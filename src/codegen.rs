@@ -77,6 +77,9 @@ impl StdFunctionRegistry {
                 fn nerv_ws_close(handle: i32) -> i32;
                 fn nerv_json_pretty(s: *const i8) -> *mut i8;
                 fn nerv_json_to_dict_ss(s: *const i8) -> *mut i8;
+                fn nerv_spawn(func: *const i8) -> i32;
+                fn nerv_join(handle: i32) -> i32;
+                fn nerv_sleep(ms: i32);
             }
             execution_engine.add_global_mapping(&ext.http_request, nerv_http_request as usize);
             execution_engine.add_global_mapping(&ext.ws_connect, nerv_ws_connect as usize);
@@ -85,6 +88,9 @@ impl StdFunctionRegistry {
             execution_engine.add_global_mapping(&ext.ws_close, nerv_ws_close as usize);
             execution_engine.add_global_mapping(&ext.json_pretty, nerv_json_pretty as usize);
             execution_engine.add_global_mapping(&ext.json_to_dict_ss, nerv_json_to_dict_ss as usize);
+            execution_engine.add_global_mapping(&ext.spawn, nerv_spawn as usize);
+            execution_engine.add_global_mapping(&ext.join, nerv_join as usize);
+            execution_engine.add_global_mapping(&ext.sleep, nerv_sleep as usize);
         }
     }
 }
@@ -1209,7 +1215,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .ok_or_else(|| format!("Unknown function: {}", func_call.name))?;
 
         // If we know the signature, coerce arguments accordingly
-        let mut args = Vec::new();
+        let mut args: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
         if let Some((param_types, ret_ty)) = get_function_signature(&func_call.name) {
             for (idx, arg_expr) in func_call.args.iter().enumerate() {
                 let expected = param_types.get(idx).copied().unwrap_or("i32");
@@ -1219,6 +1225,21 @@ impl<'ctx> CodeGenerator<'ctx> {
                             Expr::Literal(LiteralExpr::String(s)) => {
                                 let ptr = self.builder.build_global_string_ptr(s, ".str").as_pointer_value();
                                 args.push(ptr.into());
+                            }
+                            Expr::Identifier(name) => {
+                                if let Some(func) = self.user_functions.get(name).copied() {
+                                    // Pass function pointer as i8* for spawn-like APIs
+                                    let fn_ptr = func.as_global_value().as_pointer_value();
+                                    let i8ptr_ty = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+                                    let cast_ptr = self.builder.build_bitcast(fn_ptr, i8ptr_ty, "fnptr_to_i8ptr");
+                                    args.push(cast_ptr.into());
+                                } else {
+                                    // Fallback: treat as integer expression and cast to pointer
+                                    let int_val = self.gen_expr(arg_expr, _function)?;
+                                    let ptr_ty = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+                                    let ptr = self.builder.build_int_to_ptr(int_val, ptr_ty, "int_to_ptr");
+                                    args.push(ptr.into());
+                                }
                             }
                             _ => {
                                 let int_val = self.gen_expr(arg_expr, _function)?;

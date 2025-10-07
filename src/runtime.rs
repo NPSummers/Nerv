@@ -6,6 +6,8 @@
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::thread;
+use std::time::Duration;
 
 // ---- FFI helpers ----
 
@@ -185,4 +187,46 @@ pub extern "C" fn nerv_json_to_dict_ss(s: *const i8) -> *mut i8 {
     alloc_dict_ss(&pairs)
 }
 
+
+// ---- Threads ----
+
+static THREAD_REG: Lazy<Mutex<HashMap<i32, thread::JoinHandle<i32>>>> = Lazy::new(|| Mutex::new(HashMap::new()));
+static NEXT_THREAD_ID: Lazy<Mutex<i32>> = Lazy::new(|| Mutex::new(1));
+
+#[no_mangle]
+pub extern "C" fn nerv_spawn(func: *const i8) -> i32 {
+    if func.is_null() { return 0; }
+    // Safety: We expect a pointer to a JIT-emitted function with C ABI: fn() -> i32
+    let f: extern "C" fn() -> i32 = unsafe { std::mem::transmute(func) };
+    let handle = thread::spawn(move || {
+        // Call the JIT function on this OS thread
+        f()
+    });
+    let mut id_guard = NEXT_THREAD_ID.lock().unwrap();
+    let id = *id_guard;
+    *id_guard += 1;
+    THREAD_REG.lock().unwrap().insert(id, handle);
+    id
+}
+
+// ---- Sleep ----
+
+#[no_mangle]
+pub extern "C" fn nerv_sleep(ms: i32) {
+    if ms <= 0 { return; }
+    let dur = Duration::from_millis(ms as u64);
+    thread::sleep(dur);
+}
+
+#[no_mangle]
+pub extern "C" fn nerv_join(handle: i32) -> i32 {
+    let mut reg = THREAD_REG.lock().unwrap();
+    match reg.remove(&handle) {
+        Some(h) => match h.join() {
+            Ok(code) => code,
+            Err(_) => -1,
+        },
+        None => -1,
+    }
+}
 
