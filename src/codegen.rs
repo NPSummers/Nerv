@@ -25,11 +25,44 @@ use inkwell::module::Module;
 use inkwell::values::{FunctionValue, PointerValue, BasicValueEnum};
 use inkwell::types::{BasicType, BasicMetadataTypeEnum};
 use inkwell::OptimizationLevel;
+use inkwell::targets::{CodeModel, InitializationConfig, RelocMode, Target, TargetMachine};
+use inkwell::passes::PassManager;
 use std::collections::HashMap;
 use std::env;
 use std::ffi::CString;
 
 impl<'ctx> CodeGenerator<'ctx> {
+    fn run_optimizations(&self) {
+        // Function-level pipeline
+        let fpm: PassManager<inkwell::values::FunctionValue<'ctx>> = PassManager::create(&self.module);
+        fpm.add_instruction_combining_pass();
+        fpm.add_reassociate_pass();
+        fpm.add_gvn_pass();
+        fpm.add_cfg_simplification_pass();
+        fpm.add_promote_memory_to_register_pass();
+        fpm.add_licm_pass();
+        fpm.add_sccp_pass();
+        fpm.add_tail_call_elimination_pass();
+        fpm.add_loop_unroll_pass();
+        fpm.add_loop_vectorize_pass();
+        fpm.add_slp_vectorize_pass();
+        fpm.add_aggressive_dce_pass();
+        fpm.add_dead_store_elimination_pass();
+        fpm.initialize();
+
+        // Run function passes over all defined functions
+        for func in self.module.get_functions() {
+            fpm.run_on(&func);
+        }
+
+        // Module-level pipeline
+        let mpm: PassManager<inkwell::module::Module<'ctx>> = PassManager::create(());
+        mpm.add_function_inlining_pass();
+        mpm.add_constant_merge_pass();
+        mpm.add_global_dce_pass();
+        mpm.add_global_optimizer_pass();
+        mpm.run_on(&self.module);
+    }
     // --- printf helpers ---
     fn emit_printf_cstr(&self, cstr_ptr: inkwell::values::PointerValue<'ctx>) {
         let _ = self.builder.build_call(self.external_functions.printf, &[cstr_ptr.into()], "printf");
@@ -157,8 +190,29 @@ type MainFunc = unsafe extern "C" fn() -> i32;
 impl<'ctx> CodeGenerator<'ctx> {
     pub fn new(context: &'ctx Context) -> Self {
         let module = context.create_module("nerv_module");
+
+        // Configure module for host target to improve codegen
+        Target::initialize_native(&InitializationConfig::default()).ok();
+        let triple = TargetMachine::get_default_triple();
+        let cpu = TargetMachine::get_host_cpu_name();
+        let features = TargetMachine::get_host_cpu_features();
+        if let Ok(target) = Target::from_triple(&triple) {
+            if let Some(tm) = target.create_target_machine(
+                &triple,
+                cpu.to_str().unwrap_or("")
+                    .split_whitespace().next().unwrap_or(""),
+                features.to_str().unwrap_or(""),
+                OptimizationLevel::Aggressive,
+                RelocMode::Default,
+                CodeModel::Default,
+            ) {
+                let dl = tm.get_target_data().get_data_layout();
+                module.set_data_layout(&dl);
+                module.set_triple(&triple);
+            }
+        }
         let execution_engine = module
-            .create_jit_execution_engine(OptimizationLevel::None)
+            .create_jit_execution_engine(OptimizationLevel::Aggressive)
             .unwrap();
         let builder = context.create_builder();
 
@@ -207,6 +261,7 @@ impl<'ctx> CodeGenerator<'ctx> {
 
     pub fn run(&mut self, program: &Program) -> Result<i32, String> {
         self.gen_program(program)?;
+        self.run_optimizations();
         if env::var("NERV_DUMP_IR").is_ok() {
             let ir = self.module.print_to_string();
             eprintln!("===== LLVM IR BEGIN =====\n{}\n===== LLVM IR END =====", ir.to_string());
@@ -1319,6 +1374,48 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         // Map namespaced aliases to flat stdlib names if present
         let lookup_name = resolve_std_alias(&func_call.name).unwrap_or(&func_call.name);
+
+        // Special-case: random bounds inference
+        if lookup_name == "rand" {
+            // Always call C rand() and then shape into requested bounds (0 args / 1 arg / 2 args)
+            let rand_fn = self
+                .external_functions
+                .get_function_by_name("rand")
+                .ok_or_else(|| "rand not available".to_string())?;
+            let call = self.builder.build_call(rand_fn, &[], "rand_call");
+            let r = call.try_as_basic_value().left().unwrap().into_int_value();
+
+            match func_call.args.len() {
+                0 => { return Ok(r); }
+                1 => {
+                    let max_v = self.gen_expr(&func_call.args[0], _function)?;
+                    let zero = self.context.i32_type().const_int(0, false);
+                    let one = self.context.i32_type().const_int(1, false);
+                    let le_zero = self.builder.build_int_compare(inkwell::IntPredicate::SLE, max_v, zero, "max_le_zero");
+                    let safe_max = self.builder.build_select(le_zero, one, max_v, "safe_max").into_int_value();
+                    let m = self.builder.build_int_unsigned_rem(r, safe_max, "rand_mod");
+                    return Ok(m);
+                }
+                2 => {
+                    let a = self.gen_expr(&func_call.args[0], _function)?;
+                    let b = self.gen_expr(&func_call.args[1], _function)?;
+                    let b_lt_a = self.builder.build_int_compare(inkwell::IntPredicate::SLT, b, a, "b_lt_a");
+                    let min_v = self.builder.build_select(b_lt_a, b, a, "min").into_int_value();
+                    let max_v = self.builder.build_select(b_lt_a, a, b, "max").into_int_value();
+                    let range = self.builder.build_int_sub(max_v, min_v, "range");
+                    let zero = self.context.i32_type().const_int(0, false);
+                    let one = self.context.i32_type().const_int(1, false);
+                    let le_zero = self.builder.build_int_compare(inkwell::IntPredicate::SLE, range, zero, "range_le_zero");
+                    let safe_range = self.builder.build_select(le_zero, one, range, "safe_range").into_int_value();
+                    let m = self.builder.build_int_unsigned_rem(r, safe_range, "rand_mod");
+                    let out = self.builder.build_int_add(min_v, m, "rand_shift");
+                    return Ok(out);
+                }
+                _ => {
+                    return Err("rand expects 0, 1, or 2 arguments".to_string());
+                }
+            }
+        }
 
         // Get the function from our stdlib functions
         let stdlib_func = self.external_functions.get_function_by_name(lookup_name)

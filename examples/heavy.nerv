@@ -1,5 +1,7 @@
+import nerv::std::random as random;
+
 plug u: int = 21;
-plug r: int = 5000;
+plug r: int = random::rand(0, 10000);
 plug a: list<int> = [0] * 10000;
 
 plug cur: int = 0;
