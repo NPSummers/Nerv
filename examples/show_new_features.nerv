@@ -1,0 +1,77 @@
+import nerv::std;
+
+plug main(): int {
+    # Arrays/lists
+    plug a: list<int> = [1, 2, 3];
+    # (FAIL)
+    print(len(a));          # 3
+    list_push(a, 4);
+    print(list_get(a, 0));  # 1
+    list_set(a, 1, 99);
+    print(list_get(a, 1));  # 99
+    print(list_pop(a));     # 4
+
+    # Dicts (PASS)
+    plug d: dict<string, int> = {"x": 1, "y": 2};
+    print(len(d));          # 2
+    dict_set(d, "y", 5);
+    print(dict_get(d, "y"));
+
+    # Indexing sugar (PASS)
+    print(a[0]);
+    a[0] = 7;
+    print(a[0]);
+
+    # Iteration (PASS)
+    for (x in a) {
+        print(x);
+    }
+    for (i in nerv::std::iter::range(0, 3)) {
+        print(i);
+    }
+    for (z in [10, 11, 12]) {
+        print(z);
+    }
+
+    # len on strings (PASS)
+    plug s: string = "hi";
+    print(len(s));
+
+    # String '+' concat and comparisons (FAIL)
+    plug s2: string = " there";
+    plug s3: string = s + s2;
+    print(s3);
+    # equality will compare pointer identity for now
+    print((s3 == s));
+
+    # Booleans print as true/false (PASS)
+    plug b: bool = 1;
+    print(b);
+    plug b2: bool = 0;
+    print(b2);
+
+    # Namespaced std calls resolution (PASS)
+    nerv::std::random::srand(1);
+    print(nerv::std::random::rand());
+
+    # Block scoping/shadowing (PASS)
+    plug v: int = 1;
+    if (1) {
+        plug v: int = 2; # shadows outer
+        print(v);
+    } else {
+        plug v: int = 3;
+        print(v);
+    }
+    print(v); # 1
+
+    # Typechecker: uncomment to see errors (PASS)
+    plug f: float = 1 + 2.5; # ok
+    # plug bad: float = "x";   # error
+
+    # Memory tracker cleanup at end (FAILS)
+    nerv::std::cleanup_allocs(); 
+    return 0;
+}
+
+

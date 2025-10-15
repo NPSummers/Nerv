@@ -136,7 +136,7 @@ pub extern "C" fn nerv_ws_send(handle: i32, msg: *const i8) -> i32 {
     let mut reg = WS_REG.lock().unwrap();
     let Some(sock) = reg.get_mut(&handle) else { return -1; };
     let msg_s = if msg.is_null() { String::new() } else { unsafe { std::ffi::CStr::from_ptr(msg) }.to_string_lossy().to_string() };
-    match sock.write_message(tungstenite::protocol::Message::Text(msg_s)) {
+    match sock.send(tungstenite::protocol::Message::Text(msg_s)) {
         Ok(_) => 0,
         Err(_) => -1,
     }
@@ -146,7 +146,7 @@ pub extern "C" fn nerv_ws_send(handle: i32, msg: *const i8) -> i32 {
 pub extern "C" fn nerv_ws_recv(handle: i32) -> *mut i8 {
     let mut reg = WS_REG.lock().unwrap();
     let Some(sock) = reg.get_mut(&handle) else { return std::ptr::null_mut(); };
-    match sock.read_message() {
+    match sock.read() {
         Ok(msg) => match msg {
             tungstenite::protocol::Message::Text(s) => to_c_string_owned(s),
             tungstenite::protocol::Message::Binary(b) => {
@@ -256,8 +256,8 @@ pub extern "C" fn nerv_fs_exists(path: *const i8) -> i32 {
 pub extern "C" fn nerv_time_format(fmt: *const i8, epoch_secs: i64) -> *mut i8 {
     if fmt.is_null() { return std::ptr::null_mut(); }
     let fmt_s = unsafe { std::ffi::CStr::from_ptr(fmt) }.to_string_lossy().to_string();
-    let dt = chrono::NaiveDateTime::from_timestamp_opt(epoch_secs, 0);
-    match dt {
+    let dt_opt = chrono::DateTime::<chrono::Utc>::from_timestamp(epoch_secs, 0);
+    match dt_opt {
         Some(t) => to_c_string_owned(t.format(&fmt_s).to_string()),
         None => std::ptr::null_mut(),
     }
@@ -442,5 +442,23 @@ pub extern "C" fn nerv_pool_join(handle: i32) -> i32 {
     let mut ok = true;
     for h in pool.workers.drain(..) { if h.join().is_err() { ok = false; } }
     if ok { 0 } else { -1 }
+}
+
+// ---- Very simple bump-like tracking for allocations returned to JIT ----
+
+static ALLOCS: Lazy<Mutex<Vec<usize>>> = Lazy::new(|| Mutex::new(Vec::new()));
+
+#[no_mangle]
+pub extern "C" fn nerv_track_alloc(ptr: *mut i8) {
+    if ptr.is_null() { return; }
+    ALLOCS.lock().unwrap().push(ptr as usize);
+}
+
+#[no_mangle]
+pub extern "C" fn nerv_cleanup_allocs() {
+    let mut vec = ALLOCS.lock().unwrap();
+    for p in vec.drain(..) {
+        unsafe { libc::free(p as *mut libc::c_void); }
+    }
 }
 

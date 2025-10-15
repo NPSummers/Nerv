@@ -42,8 +42,12 @@ define_builtins! {
     "len" => Len,
     "list_get" => ListGet,
     "list_set" => ListSet,
+    "list_push" => ListPush,
+    "list_pop" => ListPop,
     "dict_get" => DictGet,
     "dict_set" => DictSet,
+    "int_to_string" => IntToString,
+    "string_to_int" => StringToInt,
 }
 
 // Exported macro for generating stdlib tokens in lexer
@@ -233,6 +237,25 @@ define_stdlib_functions! {
     "url_decode" => url_decode(s: i8_ptr) -> i8_ptr,
     // timing
     "sleep" => sleep(ms: i32) -> void,
+    // memory tracking helpers
+    "nerv_track_alloc" => track_alloc(ptr: i8_ptr) -> void,
+    "nerv_cleanup_allocs" => cleanup_allocs() -> void,
+    // libc basics
+    "strlen" => strlen(s: i8_ptr) -> i64,
+    "memcpy" => memcpy(dst: i8_ptr, src: i8_ptr, n: i64) -> i8_ptr,
+}
+
+/// Return allowed arity for a stdlib function.
+/// (min_args, max_args). `None` for max means variadic with unbounded maximum.
+/// Falls back to exact arity based on the declared signature when no override exists.
+pub fn get_function_arity(name: &str) -> Option<(usize, Option<usize>)> {
+    match name {
+        // printf is declared variadic in LLVM; allow 1 or more args
+        "printf" => Some((1, None)),
+        "rand" => Some((0, Some(2))),
+        // Default: exact arity equals number of declared parameters
+        _ => get_function_signature(name).map(|(params, _)| (params.len(), Some(params.len()))),
+    }
 }
 
 // Map namespaced aliases like nerv::std::http::request -> http_request, etc.
@@ -254,6 +277,8 @@ pub fn resolve_std_alias(name: &str) -> Option<&'static str> {
         // threading
         "nerv::std::thread::spawn" => Some("spawn"),
         "nerv::std::thread::join" => Some("join"),
+        // iterators
+        "nerv::std::iter::range" => Some("range"),
         // channels
         "nerv::std::sync::chan::new" => Some("chan_new"),
         "nerv::std::sync::chan::send" => Some("chan_send"),
@@ -269,6 +294,9 @@ pub fn resolve_std_alias(name: &str) -> Option<&'static str> {
         "nerv::std::env::get" => Some("getenv"),
         // libc-ish basics
         "nerv::std::io::puts" => Some("puts"),
+        // collections
+        "nerv::std::list::push" => Some("list_push"),
+        "nerv::std::list::pop" => Some("list_pop"),
         // fs
         "nerv::std::fs::read" => Some("fs_read"),
         "nerv::std::fs::write" => Some("fs_write"),
@@ -285,6 +313,12 @@ pub fn resolve_std_alias(name: &str) -> Option<&'static str> {
         // url
         "nerv::std::url::encode" => Some("url_encode"),
         "nerv::std::url::decode" => Some("url_decode"),
+        // string conversions
+        "nerv::std::string::from_int" => Some("int_to_string"),
+        "nerv::std::string::to_int" => Some("string_to_int"),
+        // memory
+        "nerv::std::cleanup_allocs" => Some("nerv_cleanup_allocs"),
+        "nerv::std::track_alloc" => Some("nerv_track_alloc"),
         _ => None,
     }
 }

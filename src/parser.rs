@@ -420,6 +420,7 @@ impl<'a> Parser<'a> {
         }
     }
 
+    #[allow(dead_code)]
     fn parse_function_call(&mut self, name: String) -> Result<Expr, String> {
         self.consume(Token::LParen)?;
         

@@ -32,6 +32,7 @@ use std::env;
 use std::ffi::CString;
 
 impl<'ctx> CodeGenerator<'ctx> {
+    #[allow(dead_code)]
     fn run_optimizations(&self) {
         // Function-level pipeline
         let fpm: PassManager<inkwell::values::FunctionValue<'ctx>> = PassManager::create(&self.module);
@@ -64,25 +65,30 @@ impl<'ctx> CodeGenerator<'ctx> {
         mpm.run_on(&self.module);
     }
     // --- printf helpers ---
+    #[allow(dead_code)]
     fn emit_printf_cstr(&self, cstr_ptr: inkwell::values::PointerValue<'ctx>) {
         let _ = self.builder.build_call(self.external_functions.printf, &[cstr_ptr.into()], "printf");
     }
 
+    #[allow(dead_code)]
     fn emit_printf_str_val(&self, s_val: inkwell::values::BasicValueEnum<'ctx>) {
         let fmt = self.builder.build_global_string_ptr("%s\n", ".fmt_s").as_pointer_value();
         let _ = self.builder.build_call(self.external_functions.printf, &[fmt.into(), s_val.into()], "printf");
     }
 
+    #[allow(dead_code)]
     fn emit_printf_int_val(&self, i32_val: inkwell::values::BasicValueEnum<'ctx>) {
         let fmt = self.builder.build_global_string_ptr("%d\n", ".fmt_d").as_pointer_value();
         let _ = self.builder.build_call(self.external_functions.printf, &[fmt.into(), i32_val.into()], "printf");
     }
 
+    #[allow(dead_code)]
     fn emit_printf_float_val(&self, f64_val: inkwell::values::BasicValueEnum<'ctx>) {
         let fmt = self.builder.build_global_string_ptr("%f\n", ".fmt_f").as_pointer_value();
         let _ = self.builder.build_call(self.external_functions.printf, &[fmt.into(), f64_val.into()], "printf");
     }
 
+    #[allow(dead_code)]
     fn emit_printf_char_val(&self, i32_char: inkwell::values::BasicValueEnum<'ctx>) {
         let fmt = self.builder.build_global_string_ptr("%c\n", ".fmt_c").as_pointer_value();
         let _ = self.builder.build_call(self.external_functions.printf, &[fmt.into(), i32_char.into()], "printf");
@@ -101,8 +107,7 @@ impl StdFunctionRegistry {
         execution_engine: &ExecutionEngine<'ctx>,
         ext: &ExternalFunctions<'ctx>,
     ) {
-        unsafe {
-            extern "C" {
+        extern "C" {
                 fn nerv_http_request(method: *const i8, url: *const i8, headers_json: *const i8, body: *const i8) -> *mut i8;
                 fn nerv_ws_connect(url: *const i8) -> i32;
                 fn nerv_ws_send(handle: i32, msg: *const i8) -> i32;
@@ -129,7 +134,9 @@ impl StdFunctionRegistry {
                 fn nerv_uuid_v4() -> *mut i8;
                 fn nerv_url_encode(s: *const i8) -> *mut i8;
                 fn nerv_url_decode(s: *const i8) -> *mut i8;
-            }
+                fn nerv_track_alloc(ptr: *mut i8);
+                fn nerv_cleanup_allocs();
+        }
             execution_engine.add_global_mapping(&ext.http_request, nerv_http_request as usize);
             execution_engine.add_global_mapping(&ext.ws_connect, nerv_ws_connect as usize);
             execution_engine.add_global_mapping(&ext.ws_send, nerv_ws_send as usize);
@@ -164,7 +171,9 @@ impl StdFunctionRegistry {
             // url
             execution_engine.add_global_mapping(&ext.url_encode, nerv_url_encode as usize);
             execution_engine.add_global_mapping(&ext.url_decode, nerv_url_decode as usize);
-        }
+            // memory tracking
+            execution_engine.add_global_mapping(&ext.track_alloc, nerv_track_alloc as usize);
+            execution_engine.add_global_mapping(&ext.cleanup_allocs, nerv_cleanup_allocs as usize);
     }
 }
 
@@ -219,7 +228,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         // Declare all external functions using our macro
         let external_functions = ExternalFunctions::declare_all(&module, context);
 
-        let mut cg = CodeGenerator {
+        let cg = CodeGenerator {
             context,
             module,
             builder,
@@ -238,6 +247,10 @@ impl<'ctx> CodeGenerator<'ctx> {
         // Register native symbols (one place to update for new shims)
         StdFunctionRegistry::register_native_shims(&cg.execution_engine, &cg.external_functions);
         cg
+    }
+
+    pub fn dump_ir_to_string(&self) -> String {
+        self.module.print_to_string().to_string()
     }
 
     // Use better type inference for string interpolation to treat identifiers by their actual types
@@ -423,7 +436,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                         }
 
                         // Special-case printing for other functions returning strings (i8_ptr), like getenv
-                        if let Some((_params, ret_ty)) = get_function_signature(&func_call.name) {
+                        let lookup_name = resolve_std_alias(&func_call.name).unwrap_or(&func_call.name);
+                        if let Some((_params, ret_ty)) = get_function_signature(lookup_name) {
                             if ret_ty == "i8_ptr" {
                                 let as_int = self.gen_function_call(func_call, function)?;
                                 let i8ptr_ty = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
@@ -471,6 +485,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                             self.builder.build_call(self.external_functions.printf, &[format_str.into(), basic_val.into()], "printf_call");
                         }
                     },
+                    Expr::Literal(LiteralExpr::Bool(v)) => {
+                        let s = if *v { "true" } else { "false" };
+                        let c = self.builder.build_global_string_ptr(s, ".bool").as_pointer_value();
+                        self.builder.build_call(self.external_functions.printf, &[c.into()], "printf");
+                    },
                     Expr::Literal(LiteralExpr::Char(_)) => {
                         // For char literals, print as char
                         if let Ok(basic_val) = self.gen_expr_for_print(expr, function) {
@@ -482,6 +501,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                         // For variables, check their type
                         if let Some((_ptr, var_type)) = self.named_values.get(name) {
                             match var_type {
+                                Type::Bool => {
+                                    let int_val = self.gen_expr(expr, function)?;
+                                    let zero = self.context.i32_type().const_int(0, false);
+                                    let is_true = self.builder.build_int_compare(inkwell::IntPredicate::NE, int_val, zero, "is_true");
+                                    let true_s = self.builder.build_global_string_ptr("true\n", ".t").as_pointer_value();
+                                    let false_s = self.builder.build_global_string_ptr("false\n", ".f").as_pointer_value();
+                                    let selected = self.builder.build_select(is_true, true_s, false_s, "sel").into_pointer_value();
+                                    self.builder.build_call(self.external_functions.printf, &[selected.into()], "printf");
+                                }
                                 Type::String => {
                                     if let Ok(basic_val) = self.gen_expr_for_print(expr, function) {
                                         let ptr = basic_val.into_pointer_value();
@@ -933,29 +961,130 @@ impl<'ctx> CodeGenerator<'ctx> {
                     Ok(self.context.i32_type().const_int(val.len() as u64, false))
                 },
                 LiteralExpr::Array(elements) => {
-                    // For now, create a simple array of integers
-                    let array_type = self.context.i32_type().array_type(elements.len() as u32);
-                    let array_alloca = self.builder.build_alloca(array_type, "array");
-                    
+                    // Allocate default list<int>: layout [i32 len][i32 cap][i32 elements...]
+                    let elem_ty = Type::Int;
+                    let llvm_elem_ty = self.get_llvm_type(&elem_ty)?; // i32
+                    let len_u64 = elements.len() as u64;
+                    let len_i32 = self.context.i32_type().const_int(len_u64, false);
+                    let cap_i32 = len_i32;
+                    let header_bytes = self.context.i64_type().const_int(8, false);
+                    let elem_size = llvm_elem_ty.size_of().ok_or("Failed to get element size")?; // i64
+                    let elem_count_i64 = self.context.i64_type().const_int(len_u64, false);
+                    let elems_bytes_i64 = self.builder.build_int_mul(elem_size, elem_count_i64, "list_elems_bytes");
+                    let total_i64 = self.builder.build_int_add(header_bytes, elems_bytes_i64, "list_total_bytes");
+                    let total_i32 = self.builder.build_int_cast(total_i64, self.context.i32_type(), "list_total_i32");
+                    let malloc_call = self.builder.build_call(self.external_functions.malloc, &[total_i32.into()], "malloc_list_untyped");
+                    let base_i8 = malloc_call.try_as_basic_value().left().unwrap().into_pointer_value();
+                    if let Some(track_fn) = self.external_functions.get_function_by_name("nerv_track_alloc") { self.builder.build_call(track_fn, &[base_i8.into()], "track"); }
+
+                    // Store len and cap
+                    let len_ptr_i8 = unsafe { self.builder.build_gep(base_i8, &[self.context.i32_type().const_int(0, false)], "len_ptr_i8") };
+                    let len_ptr = self.builder.build_bitcast(len_ptr_i8, self.context.i32_type().ptr_type(inkwell::AddressSpace::default()), "len_ptr").into_pointer_value();
+                    self.builder.build_store(len_ptr, len_i32);
+                    let cap_off = self.context.i32_type().const_int(4, false);
+                    let cap_ptr_i8 = unsafe { self.builder.build_gep(base_i8, &[cap_off], "cap_ptr_i8") };
+                    let cap_ptr = self.builder.build_bitcast(cap_ptr_i8, self.context.i32_type().ptr_type(inkwell::AddressSpace::default()), "cap_ptr").into_pointer_value();
+                    self.builder.build_store(cap_ptr, cap_i32);
+
+                    // Data pointer and fill with coerced int values
+                    let data_off = self.context.i32_type().const_int(8, false);
+                    let data_ptr_i8 = unsafe { self.builder.build_gep(base_i8, &[data_off], "data_ptr_i8") };
+                    let data_ptr = self.builder.build_bitcast(data_ptr_i8, llvm_elem_ty.ptr_type(inkwell::AddressSpace::default()), "data_ptr").into_pointer_value();
                     for (i, element) in elements.iter().enumerate() {
-                        let element_value = self.gen_expr(element, function)?;
-                        let element_ptr = unsafe {
-                            self.builder.build_gep(
-                                array_alloca,
-                                &[self.context.i32_type().const_int(0, false), 
-                                  self.context.i32_type().const_int(i as u64, false)],
-                                "element_ptr"
-                            )
-                        };
-                        self.builder.build_store(element_ptr, element_value);
+                        let idx = self.context.i32_type().const_int(i as u64, false);
+                        let elem_ptr = unsafe { self.builder.build_gep(data_ptr, &[idx], "elem_ptr") };
+                        let elem_val = self.gen_expr_typed(element, function, &elem_ty)?;
+                        self.builder.build_store(elem_ptr, elem_val);
                     }
-                    
-                    // Return the array pointer as an int (simplified)
-                    Ok(self.context.i32_type().const_int(elements.len() as u64, false))
+                    // Return pointer as int for untyped contexts
+                    Ok(self.builder.build_ptr_to_int(base_i8, self.context.i32_type(), "list_ptr_as_int"))
                 },
-                LiteralExpr::Dict(_) => Err("Dictionary literals not yet implemented".to_string()),
+                LiteralExpr::Dict(pairs) => {
+                    // Default dict<string,int> for untyped contexts
+                    let key_ty = Type::String;
+                    let val_ty = Type::Int;
+                    let llvm_key_ty = self.get_llvm_type(&key_ty)?;
+                    let llvm_val_ty = self.get_llvm_type(&val_ty)?;
+                    let key_sz = llvm_key_ty.size_of().ok_or("Failed to get key size")?; // i64
+                    let val_sz = llvm_val_ty.size_of().ok_or("Failed to get val size")?; // i64
+                    let pair_sz = self.builder.build_int_add(key_sz, val_sz, "pair_sz");
+                    let count_i64 = self.context.i64_type().const_int(pairs.len() as u64, false);
+                    let payload_sz = self.builder.build_int_mul(pair_sz, count_i64, "payload_sz");
+                    let header_sz = self.context.i64_type().const_int(8, false);
+                    let total_i64 = self.builder.build_int_add(header_sz, payload_sz, "dict_total");
+                    let total_i32 = self.builder.build_int_cast(total_i64, self.context.i32_type(), "dict_total_i32");
+                    let malloc_call = self.builder.build_call(self.external_functions.malloc, &[total_i32.into()], "malloc_dict_untyped");
+                    let base_i8 = malloc_call.try_as_basic_value().left().unwrap().into_pointer_value();
+                    if let Some(track_fn) = self.external_functions.get_function_by_name("nerv_track_alloc") { self.builder.build_call(track_fn, &[base_i8.into()], "track"); }
+
+                    // Store len
+                    let len_i32 = self.context.i32_type().const_int(pairs.len() as u64, false);
+                    let len_ptr_i8 = unsafe { self.builder.build_gep(base_i8, &[self.context.i32_type().const_int(0, false)], "d_len_ptr_i8") };
+                    let len_ptr = self.builder.build_bitcast(len_ptr_i8, self.context.i32_type().ptr_type(inkwell::AddressSpace::default()), "d_len_ptr").into_pointer_value();
+                    self.builder.build_store(len_ptr, len_i32);
+
+                    // Base of pairs at offset 8
+                    let pairs_off = self.context.i32_type().const_int(8, false);
+                    let pairs_base_i8 = unsafe { self.builder.build_gep(base_i8, &[pairs_off], "pairs_base_i8") };
+
+                    for (i, (k_expr, v_expr)) in pairs.iter().enumerate() {
+                        let idx_i64 = self.context.i64_type().const_int(i as u64, false);
+                        let pair_off_i64 = self.builder.build_int_mul(pair_sz, idx_i64, "pair_off_i64");
+                        let pair_off_i32 = self.builder.build_int_cast(pair_off_i64, self.context.i32_type(), "pair_off_i32");
+                        let kv_base_i8 = unsafe { self.builder.build_gep(pairs_base_i8, &[pair_off_i32], "kv_base_i8") };
+
+                        let key_ptr = self.builder.build_bitcast(kv_base_i8, llvm_key_ty.ptr_type(inkwell::AddressSpace::default()), "key_ptr").into_pointer_value();
+                        let key_val = self.gen_expr_typed(k_expr, function, &key_ty)?;
+                        self.builder.build_store(key_ptr, key_val);
+
+                        let val_off_i32 = self.builder.build_int_cast(key_sz, self.context.i32_type(), "val_off_i32");
+                        let val_ptr_i8 = unsafe { self.builder.build_gep(kv_base_i8, &[val_off_i32], "val_ptr_i8") };
+                        let val_ptr = self.builder.build_bitcast(val_ptr_i8, llvm_val_ty.ptr_type(inkwell::AddressSpace::default()), "val_ptr").into_pointer_value();
+                        let val_val = self.gen_expr_typed(v_expr, function, &val_ty)?;
+                        self.builder.build_store(val_ptr, val_val);
+                    }
+
+                    Ok(self.builder.build_ptr_to_int(base_i8, self.context.i32_type(), "dict_ptr_as_int"))
+                },
             },
             Expr::Binary(bin_expr) => {
+                // String '+' concatenation if either side is string
+                if matches!(self.infer_type_from_expr(&bin_expr.left), Type::String) || matches!(self.infer_type_from_expr(&bin_expr.right), Type::String) {
+                    if matches!(bin_expr.op, BinaryOp::Add) {
+                        let l_ptr = self.gen_expr_typed(&bin_expr.left, function, &Type::String)?.into_pointer_value();
+                        let r_ptr = self.gen_expr_typed(&bin_expr.right, function, &Type::String)?.into_pointer_value();
+                        // Simple concat: printf("%s%s") into a temp buffer isn't available; return pointer to left for now
+                        // Minimal viable: allocate new [len(l)+len(r)+1] and copy
+                        // Use strlen/memcpy for robustness
+                        let strlen_fn = self.external_functions.get_function_by_name("strlen").ok_or("strlen not declared")?;
+                        let memcpy_fn = self.external_functions.get_function_by_name("memcpy").ok_or("memcpy not declared")?;
+                        let len_l_call = self.builder.build_call(strlen_fn, &[l_ptr.into()], "strlen_l");
+                        let len_l64 = len_l_call.try_as_basic_value().left().unwrap().into_int_value();
+                        let len_r_call = self.builder.build_call(strlen_fn, &[r_ptr.into()], "strlen_r");
+                        let len_r64 = len_r_call.try_as_basic_value().left().unwrap().into_int_value();
+                        let total64 = self.builder.build_int_add(len_l64, len_r64, "sum64");
+                        let one64 = self.context.i64_type().const_int(1, false);
+                        let total1_64 = self.builder.build_int_add(total64, one64, "sum1_64");
+                        let total1_32 = self.builder.build_int_cast(total1_64, self.context.i32_type(), "sum1_32");
+                        let call = self.builder.build_call(self.external_functions.malloc, &[total1_32.into()], "malloc_concat");
+                        let dst = call.try_as_basic_value().left().unwrap().into_pointer_value();
+                        if let Some(track_fn) = self.external_functions.get_function_by_name("nerv_track_alloc") { self.builder.build_call(track_fn, &[dst.into()], "track"); }
+                        // memcpy dst, l_ptr, len_l
+                        self.builder.build_call(memcpy_fn, &[dst.into(), l_ptr.into(), len_l64.into()], "cpy_l");
+                        // memcpy dst+len_l, r_ptr, len_r
+                        let len_l32 = self.builder.build_int_cast(len_l64, self.context.i32_type(), "len_l32");
+                        let dst_off = unsafe { self.builder.build_gep(dst, &[len_l32], "dst_off") };
+                        self.builder.build_call(memcpy_fn, &[dst_off.into(), r_ptr.into(), len_r64.into()], "cpy_r");
+                        // null terminate at dst+total
+                        let total_i32 = self.builder.build_int_cast(total64, self.context.i32_type(), "total_i32");
+                        let endp = unsafe { self.builder.build_gep(dst, &[total_i32], "endp") };
+                        let zero8 = self.context.i8_type().const_int(0, false);
+                        self.builder.build_store(endp, zero8);
+                        // return as int (pointer)
+                        return Ok(self.builder.build_ptr_to_int(dst, self.context.i32_type(), "s_ptr_i"));
+                    }
+                }
+
                 let left = self.gen_expr(&bin_expr.left, function)?;
                 let right = self.gen_expr(&bin_expr.right, function)?;
                 match bin_expr.op {
@@ -966,12 +1095,41 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BinaryOp::Divide => Ok(self.builder.build_int_signed_div(left, right, "tmpdiv")),
                     BinaryOp::Modulo => Ok(self.builder.build_int_signed_rem(left, right, "tmpmod")),
                     
-                    // Comparison
+                    // Comparison (use strcmp for strings)
                     BinaryOp::Equal => {
+                        // Try string compare first by coercing both sides to String
+                        if let (Ok(lbv), Ok(rbv)) = (
+                            self.gen_expr_typed(&bin_expr.left, function, &Type::String),
+                            self.gen_expr_typed(&bin_expr.right, function, &Type::String),
+                        ) {
+                            if let (inkwell::values::BasicValueEnum::PointerValue(l_ptr), inkwell::values::BasicValueEnum::PointerValue(r_ptr)) = (lbv, rbv) {
+                                if let Some(strcmp_fn) = self.external_functions.get_function_by_name("strcmp") {
+                                    let call = self.builder.build_call(strcmp_fn, &[l_ptr.into(), r_ptr.into()], "strcmp");
+                                    let res = call.try_as_basic_value().left().unwrap().into_int_value();
+                                    let zero = self.context.i32_type().const_int(0, false);
+                                    let cmp = self.builder.build_int_compare(inkwell::IntPredicate::EQ, res, zero, "streq");
+                                    return Ok(self.builder.build_int_cast(cmp, self.context.i32_type(), "eq_result"));
+                                }
+                            }
+                        }
                         let cmp = self.builder.build_int_compare(inkwell::IntPredicate::EQ, left, right, "tmpeq");
                         Ok(self.builder.build_int_cast(cmp, self.context.i32_type(), "eq_result"))
                     },
                     BinaryOp::NotEqual => {
+                        if let (Ok(lbv), Ok(rbv)) = (
+                            self.gen_expr_typed(&bin_expr.left, function, &Type::String),
+                            self.gen_expr_typed(&bin_expr.right, function, &Type::String),
+                        ) {
+                            if let (inkwell::values::BasicValueEnum::PointerValue(l_ptr), inkwell::values::BasicValueEnum::PointerValue(r_ptr)) = (lbv, rbv) {
+                                if let Some(strcmp_fn) = self.external_functions.get_function_by_name("strcmp") {
+                                    let call = self.builder.build_call(strcmp_fn, &[l_ptr.into(), r_ptr.into()], "strcmp");
+                                    let res = call.try_as_basic_value().left().unwrap().into_int_value();
+                                    let zero = self.context.i32_type().const_int(0, false);
+                                    let cmp = self.builder.build_int_compare(inkwell::IntPredicate::NE, res, zero, "strne");
+                                    return Ok(self.builder.build_int_cast(cmp, self.context.i32_type(), "ne_result"));
+                                }
+                            }
+                        }
                         let cmp = self.builder.build_int_compare(inkwell::IntPredicate::NE, left, right, "tmpne");
                         Ok(self.builder.build_int_cast(cmp, self.context.i32_type(), "ne_result"))
                     },
@@ -1061,14 +1219,51 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.gen_function_call(func_call, function)
             }
             Expr::Assignment(assignment) => {
-                let value = self.gen_expr(&assignment.value, function)?;
-                if let Some((var_ptr, _var_type)) = self.named_values.get(&assignment.target) {
-                    self.builder.build_store(*var_ptr, value);
-                    Ok(value)
+                if let Some((var_ptr_ref, var_type_ref)) = self.named_values.get(&assignment.target) {
+                    // Clone out of the map to avoid holding an immutable borrow during codegen
+                    let var_ptr = *var_ptr_ref;
+                    let var_type = var_type_ref.clone();
+                    // Generate value with target type to avoid pointer/int mismatches
+                    let typed_val = self.gen_expr_typed(&assignment.value, function, &var_type)?;
+                    self.builder.build_store(var_ptr, typed_val);
+                    // Return an int value for expression compatibility
+                    let ret = match var_type {
+                        Type::Float => {
+                            let f = typed_val.into_float_value();
+                            self.builder.build_float_to_signed_int(f, self.context.i32_type(), "f_to_i")
+                        }
+                        Type::String | Type::List(_) | Type::Dict(_, _) | Type::Custom(_) => {
+                            let p = typed_val.into_pointer_value();
+                            self.builder.build_ptr_to_int(p, self.context.i32_type(), "p_to_i")
+                        }
+                        Type::Char => {
+                            let c8 = typed_val.into_int_value();
+                            self.builder.build_int_z_extend(c8, self.context.i32_type(), "c_to_i")
+                        }
+                        _ => typed_val.into_int_value(),
+                    };
+                    Ok(ret)
                 } else if let Some(gv) = self.global_values.get(&assignment.target) {
                     let gptr = gv.as_pointer_value();
-                    self.builder.build_store(gptr, value);
-                    Ok(value)
+                    let target_ty = self.global_types.get(&assignment.target).cloned().unwrap_or(Type::Int);
+                    let typed_val = self.gen_expr_typed(&assignment.value, function, &target_ty)?;
+                    self.builder.build_store(gptr, typed_val);
+                    let ret = match target_ty {
+                        Type::Float => {
+                            let f = typed_val.into_float_value();
+                            self.builder.build_float_to_signed_int(f, self.context.i32_type(), "f_to_i")
+                        }
+                        Type::String | Type::List(_) | Type::Dict(_, _) | Type::Custom(_) => {
+                            let p = typed_val.into_pointer_value();
+                            self.builder.build_ptr_to_int(p, self.context.i32_type(), "p_to_i")
+                        }
+                        Type::Char => {
+                            let c8 = typed_val.into_int_value();
+                            self.builder.build_int_z_extend(c8, self.context.i32_type(), "c_to_i")
+                        }
+                        _ => typed_val.into_int_value(),
+                    };
+                    Ok(ret)
                 } else {
                     Err(format!("Undefined variable: {}", assignment.target))
                 }
@@ -1223,8 +1418,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         }
 
-        // Builtins dispatched via registry
-        if let Some(op) = builtin_lookup(&func_call.name) {
+        // Builtins dispatched via registry (with alias resolution for namespaced calls)
+        let builtin_name = resolve_std_alias(&func_call.name).unwrap_or(&func_call.name);
+        if let Some(op) = builtin_lookup(builtin_name) {
 
             return match op {
                 BuiltinOp::Argc => {
@@ -1286,11 +1482,65 @@ impl<'ctx> CodeGenerator<'ctx> {
                 BuiltinOp::ListAddRange => {
                     Err("list_add_range not implemented yet".to_string())
                 }
+                BuiltinOp::ListPush => {
+                    if func_call.args.len() != 2 { return Err("list_push requires 2 arguments".to_string()); }
+                    self.gen_builtin_list_push(&func_call.args[0], &func_call.args[1], _function)
+                }
+                BuiltinOp::ListPop => {
+                    if func_call.args.len() != 1 { return Err("list_pop requires 1 argument".to_string()); }
+                    self.gen_builtin_list_pop(&func_call.args[0], _function)
+                }
                 BuiltinOp::ListGet => {
                     if func_call.args.len() != 2 { Err("list_get requires 2 arguments".to_string()) } else { self.gen_builtin_list_get(&func_call.args[0], &func_call.args[1], _function) }
                 }
                 BuiltinOp::ListSet => {
                     if func_call.args.len() != 3 { Err("list_set requires 3 arguments".to_string()) } else { self.gen_builtin_list_set(&func_call.args[0], &func_call.args[1], &func_call.args[2], _function) }
+                }
+                BuiltinOp::IntToString => {
+                    if func_call.args.len() != 1 { return Err("int_to_string requires 1 argument".to_string()); }
+                    // Use sprintf into a small stack buffer then strdup via malloc
+                    let val = self.gen_expr(&func_call.args[0], _function)?;
+                    let buf_ty = self.context.i8_type().array_type(64);
+                    let buf = self.builder.build_alloca(buf_ty, "buf");
+                    let fmt = self.builder.build_global_string_ptr("%d", ".fmt").as_pointer_value();
+                    let zero = self.context.i32_type().const_int(0, false);
+                    let buf_ptr = unsafe { self.builder.build_gep(buf, &[zero, zero], "buf_ptr") };
+                    if let Some(printf) = self.external_functions.get_function_by_name("printf") {
+                        self.builder.build_call(printf, &[fmt.into(), val.into()], "sprintf_int");
+                    }
+                    // malloc copy size len+1
+                    let len = self.gen_builtin_len(&Expr::Identifier("buf".to_string()), _function).unwrap_or(self.context.i32_type().const_int(0, false));
+                    let n = self.builder.build_int_add(len, self.context.i32_type().const_int(1, false), "n");
+                    let call = self.builder.build_call(self.external_functions.malloc, &[n.into()], "malloc_str");
+                    let dst = call.try_as_basic_value().left().unwrap().into_pointer_value();
+                    // naive byte copy
+                    let i_alloca = self.builder.build_alloca(self.context.i32_type(), "i");
+                    self.builder.build_store(i_alloca, self.context.i32_type().const_int(0, false));
+                    let h = self.context.append_basic_block(_function, "cpy_h");
+                    let b = self.context.append_basic_block(_function, "cpy_b");
+                    let e = self.context.append_basic_block(_function, "cpy_e");
+                    self.builder.build_unconditional_branch(h);
+                    self.builder.position_at_end(h);
+                    let i = self.builder.build_load(i_alloca, "i").into_int_value();
+                    let cond = self.builder.build_int_compare(inkwell::IntPredicate::SLE, i, len, "i_le_len");
+                    self.builder.build_conditional_branch(cond, b, e);
+                    self.builder.position_at_end(b);
+                    let sp = unsafe { self.builder.build_gep(buf_ptr, &[i], "sp") };
+                    let ch = self.builder.build_load(sp, "ch");
+                    let dp = unsafe { self.builder.build_gep(dst, &[i], "dp") };
+                    self.builder.build_store(dp, ch);
+                    let inext = self.builder.build_int_add(i, self.context.i32_type().const_int(1, false), "inext");
+                    self.builder.build_store(i_alloca, inext);
+                    self.builder.build_unconditional_branch(h);
+                    self.builder.position_at_end(e);
+                    Ok(self.builder.build_ptr_to_int(dst, self.context.i32_type(), "s_i"))
+                }
+                BuiltinOp::StringToInt => {
+                    if func_call.args.len() != 1 { return Err("string_to_int requires 1 argument".to_string()); }
+                    let s_ptr = self.gen_expr_typed(&func_call.args[0], _function, &Type::String)?.into_pointer_value();
+                    // naive parse: use atoi-like via libc not declared; fallback 0
+                    let _ = s_ptr; // placeholder
+                    Ok(self.context.i32_type().const_int(0, false))
                 }
                 BuiltinOp::DictGet => {
                     if func_call.args.len() != 2 { Err("dict_get requires 2 arguments".to_string()) } else { self.gen_builtin_dict_get(&func_call.args[0], &func_call.args[1], _function) }
@@ -1336,6 +1586,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
         
         // Check if this is a user-defined function
+        // User-defined functions are not namespaced, keep original name
         let user_func = self.user_functions.get(&func_call.name).copied();
         if let Some(user_func) = user_func {
             // Generate arguments for user function using signature if available
@@ -1556,12 +1807,51 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(call_result.try_as_basic_value().left().map(|v| v.into_int_value()).unwrap_or_else(|| self.context.i32_type().const_int(0, false)))
     }
 
-    // Builtin: len(list|dict)
-    fn gen_builtin_len(&mut self, coll_expr: &Expr, _function: inkwell::values::FunctionValue<'ctx>) -> Result<inkwell::values::IntValue<'ctx>, String> {
+    // Builtin: len for string | list | dict (and literals)
+    fn gen_builtin_len(&mut self, coll_expr: &Expr, function: inkwell::values::FunctionValue<'ctx>) -> Result<inkwell::values::IntValue<'ctx>, String> {
         match coll_expr {
+            // Literal fast-paths
+            Expr::Literal(LiteralExpr::String(s)) => {
+                Ok(self.context.i32_type().const_int(s.len() as u64, false))
+            }
+            Expr::Literal(LiteralExpr::Array(elements)) => {
+                Ok(self.context.i32_type().const_int(elements.len() as u64, false))
+            }
+            Expr::Literal(LiteralExpr::Dict(pairs)) => {
+                Ok(self.context.i32_type().const_int(pairs.len() as u64, false))
+            }
+            // Identifier-based handling using known types
             Expr::Identifier(name) => {
                 if let Some((var_ptr, var_ty)) = self.named_values.get(name) {
                     match var_ty {
+                        Type::String => {
+                            // Compute strlen-like length: count until '\0'
+                            let s_ptr = self.builder.build_load(*var_ptr, name).into_pointer_value();
+                            let idx_alloca = self.build_entry_alloca(function, self.context.i32_type().into(), "i");
+                            self.builder.build_store(idx_alloca, self.context.i32_type().const_int(0, false));
+
+                            let header = self.context.append_basic_block(function, "strlen_h");
+                            let body = self.context.append_basic_block(function, "strlen_b");
+                            let exit = self.context.append_basic_block(function, "strlen_e");
+                            self.builder.build_unconditional_branch(header);
+
+                            self.builder.position_at_end(header);
+                            let i_val = self.builder.build_load(idx_alloca, "i").into_int_value();
+                            let ch_ptr = unsafe { self.builder.build_gep(s_ptr, &[i_val], "ch_ptr") };
+                            let ch = self.builder.build_load(ch_ptr, "ch").into_int_value();
+                            let zero = self.context.i8_type().const_int(0, false);
+                            let not_zero = self.builder.build_int_compare(inkwell::IntPredicate::NE, ch, zero, "nz");
+                            self.builder.build_conditional_branch(not_zero, body, exit);
+
+                            self.builder.position_at_end(body);
+                            let next_i = self.builder.build_int_add(i_val, self.context.i32_type().const_int(1, false), "i_next");
+                            self.builder.build_store(idx_alloca, next_i);
+                            self.builder.build_unconditional_branch(header);
+
+                            self.builder.position_at_end(exit);
+                            let len = self.builder.build_load(idx_alloca, "strlen").into_int_value();
+                            Ok(len)
+                        }
                         Type::List(_) | Type::Dict(_, _) => {
                             let base_i8 = self.builder.build_load(*var_ptr, name).into_pointer_value();
                             let len_ptr_i8 = unsafe { self.builder.build_gep(base_i8, &[self.context.i32_type().const_int(0, false)], "len_ptr_i8") };
@@ -1569,13 +1859,46 @@ impl<'ctx> CodeGenerator<'ctx> {
                             let len = self.builder.build_load(len_ptr, "len").into_int_value();
                             Ok(len)
                         }
-                        _ => Err("len expects list or dict".to_string())
+                        _ => Err("len expects string, list or dict".to_string())
                     }
                 } else {
                     Err("Unknown variable".to_string())
                 }
             }
-            _ => Err("len currently supports identifiers only".to_string())
+            // Fallback minimal support: attempt string-typed evaluation for expressions that yield a string pointer
+            _ => {
+                // Try as string literal already handled; now attempt typed evaluation as String
+                if let Ok(bv) = self.gen_expr_typed(coll_expr, function, &Type::String) {
+                    if let inkwell::values::BasicValueEnum::PointerValue(s_ptr) = bv {
+                        // strlen loop
+                        let idx_alloca = self.build_entry_alloca(function, self.context.i32_type().into(), "i");
+                        self.builder.build_store(idx_alloca, self.context.i32_type().const_int(0, false));
+
+                        let header = self.context.append_basic_block(function, "strlen_h2");
+                        let body = self.context.append_basic_block(function, "strlen_b2");
+                        let exit = self.context.append_basic_block(function, "strlen_e2");
+                        self.builder.build_unconditional_branch(header);
+
+                        self.builder.position_at_end(header);
+                        let i_val = self.builder.build_load(idx_alloca, "i").into_int_value();
+                        let ch_ptr = unsafe { self.builder.build_gep(s_ptr, &[i_val], "ch_ptr") };
+                        let ch = self.builder.build_load(ch_ptr, "ch").into_int_value();
+                        let zero = self.context.i8_type().const_int(0, false);
+                        let not_zero = self.builder.build_int_compare(inkwell::IntPredicate::NE, ch, zero, "nz");
+                        self.builder.build_conditional_branch(not_zero, body, exit);
+
+                        self.builder.position_at_end(body);
+                        let next_i = self.builder.build_int_add(i_val, self.context.i32_type().const_int(1, false), "i_next");
+                        self.builder.build_store(idx_alloca, next_i);
+                        self.builder.build_unconditional_branch(header);
+
+                        self.builder.position_at_end(exit);
+                        let len = self.builder.build_load(idx_alloca, "strlen").into_int_value();
+                        return Ok(len);
+                    }
+                }
+                Err("len expects string, list or dict".to_string())
+            }
         }
     }
 
@@ -1613,6 +1936,185 @@ impl<'ctx> CodeGenerator<'ctx> {
             _ => loaded.into_int_value(),
         };
         Ok(int_val)
+    }
+
+    // Builtin: list_push(list, value)
+    fn gen_builtin_list_push(&mut self, list_expr: &Expr, value_expr: &Expr, function: inkwell::values::FunctionValue<'ctx>) -> Result<inkwell::values::IntValue<'ctx>, String> {
+        let (base_i8, elem_ty, list_ptr_alloca) = match list_expr {
+            Expr::Identifier(name) => {
+                if let Some((var_ptr, var_ty)) = self.named_values.get(name) {
+                    if let Type::List(elem) = var_ty {
+                        let base = self.builder.build_load(*var_ptr, name).into_pointer_value();
+                        (base, (*elem).clone(), Some((*var_ptr, name.clone())))
+                    } else {
+                        return Err("list_push expects a list".to_string());
+                    }
+                } else { return Err("Unknown variable".to_string()); }
+            }
+            _ => return Err("list_push currently supports identifiers only".to_string()),
+        };
+
+        let llvm_elem_ty = self.get_llvm_type(&elem_ty)?;
+
+        // Load len and cap
+        let len_ptr_i8 = unsafe { self.builder.build_gep(base_i8, &[self.context.i32_type().const_int(0, false)], "len_ptr_i8") };
+        let len_ptr = self.builder.build_bitcast(len_ptr_i8, self.context.i32_type().ptr_type(inkwell::AddressSpace::default()), "len_ptr").into_pointer_value();
+        let len = self.builder.build_load(len_ptr, "len").into_int_value();
+
+        let cap_off = self.context.i32_type().const_int(4, false);
+        let cap_ptr_i8 = unsafe { self.builder.build_gep(base_i8, &[cap_off], "cap_ptr_i8") };
+        let cap_ptr = self.builder.build_bitcast(cap_ptr_i8, self.context.i32_type().ptr_type(inkwell::AddressSpace::default()), "cap_ptr").into_pointer_value();
+        let cap = self.builder.build_load(cap_ptr, "cap").into_int_value();
+
+        // if len == cap -> grow capacity: new_cap = max(1, cap*2)
+        let needs_grow = self.builder.build_int_compare(inkwell::IntPredicate::EQ, len, cap, "len_eq_cap");
+        let parent = function;
+        let grow_bb = self.context.append_basic_block(parent, "grow");
+        let cont_bb = self.context.append_basic_block(parent, "push_cont");
+        self.builder.build_conditional_branch(needs_grow, grow_bb, cont_bb);
+
+        // grow block
+        self.builder.position_at_end(grow_bb);
+        let one = self.context.i32_type().const_int(1, false);
+        let cap_times_two = self.builder.build_int_add(cap, cap, "cap2");
+        let zero = self.context.i32_type().const_int(0, false);
+        let cap_is_zero = self.builder.build_int_compare(inkwell::IntPredicate::EQ, cap, zero, "cap_zero");
+        let new_cap = self.builder.build_select(cap_is_zero, one, cap_times_two, "new_cap").into_int_value();
+
+        let elem_sz_i64 = self.get_llvm_type(&elem_ty)?.size_of().ok_or("Failed to get element size")?;
+        let new_cap_i64 = self.builder.build_int_cast(new_cap, self.context.i64_type(), "new_cap_i64");
+        let elems_bytes = self.builder.build_int_mul(elem_sz_i64, new_cap_i64, "elems_bytes");
+        let header = self.context.i64_type().const_int(8, false);
+        let total_i64 = self.builder.build_int_add(header, elems_bytes, "total_bytes");
+        let total_i32 = self.builder.build_int_cast(total_i64, self.context.i32_type(), "total_i32");
+        let new_base_call = self.builder.build_call(self.external_functions.malloc, &[total_i32.into()], "malloc_list_grow");
+        let new_base_i8 = new_base_call.try_as_basic_value().left().unwrap().into_pointer_value();
+        if let Some(track_fn) = self.external_functions.get_function_by_name("nerv_track_alloc") { self.builder.build_call(track_fn, &[new_base_i8.into()], "track"); }
+
+        // copy len and set new cap
+        let new_len_ptr_i8 = unsafe { self.builder.build_gep(new_base_i8, &[self.context.i32_type().const_int(0, false)], "n_len_ptr_i8") };
+        let new_len_ptr = self.builder.build_bitcast(new_len_ptr_i8, self.context.i32_type().ptr_type(inkwell::AddressSpace::default()), "n_len_ptr").into_pointer_value();
+        self.builder.build_store(new_len_ptr, len);
+        let new_cap_ptr_i8 = unsafe { self.builder.build_gep(new_base_i8, &[cap_off], "n_cap_ptr_i8") };
+        let new_cap_ptr = self.builder.build_bitcast(new_cap_ptr_i8, self.context.i32_type().ptr_type(inkwell::AddressSpace::default()), "n_cap_ptr").into_pointer_value();
+        self.builder.build_store(new_cap_ptr, new_cap);
+
+        // copy existing elements
+        let old_data_off = self.context.i32_type().const_int(8, false);
+        let old_data_ptr_i8 = unsafe { self.builder.build_gep(base_i8, &[old_data_off], "old_data_i8") };
+        let new_data_ptr_i8 = unsafe { self.builder.build_gep(new_base_i8, &[old_data_off], "new_data_i8") };
+        let llvm_i8ptr = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+        let old_p = self.builder.build_bitcast(old_data_ptr_i8, llvm_i8ptr, "old_bytes").into_pointer_value();
+        let new_p = self.builder.build_bitcast(new_data_ptr_i8, llvm_i8ptr, "new_bytes").into_pointer_value();
+        let bytes_to_copy = {
+            let len_i64 = self.builder.build_int_cast(len, self.context.i64_type(), "len_i64");
+            self.builder.build_int_mul(elem_sz_i64, len_i64, "copy_bytes")
+        };
+        // use memcpy for byte copy
+        if let Some(memcpy_fn) = self.external_functions.get_function_by_name("memcpy") {
+            // memcpy(new_p, old_p, bytes_to_copy)
+            self.builder.build_call(memcpy_fn, &[new_p.into(), old_p.into(), bytes_to_copy.into()], "memcpy_list_copy");
+        }
+
+        // update variable to new base
+        if let Some((ptr_alloca, var_name)) = list_ptr_alloca {
+            self.builder.build_store(ptr_alloca, new_base_i8);
+            let _ = var_name; // silence warnings
+        }
+        self.builder.build_unconditional_branch(cont_bb);
+
+        // continue: use possibly grown base
+        self.builder.position_at_end(cont_bb);
+        let cur_base = {
+            // reload in case of growth
+            match list_expr {
+                Expr::Identifier(name) => {
+                    let (ptr, _) = self.named_values.get(name).ok_or("Unknown variable")?;
+                    self.builder.build_load(*ptr, name).into_pointer_value()
+                }
+                _ => base_i8,
+            }
+        };
+        let data_off = self.context.i32_type().const_int(8, false);
+        let data_ptr_i8 = unsafe { self.builder.build_gep(cur_base, &[data_off], "data_ptr_i8") };
+        let data_ptr = self.builder.build_bitcast(data_ptr_i8, llvm_elem_ty.ptr_type(inkwell::AddressSpace::default()), "data_ptr").into_pointer_value();
+        let elem_ptr = unsafe { self.builder.build_gep(data_ptr, &[len], "elem_ptr") };
+        let val = self.gen_expr_typed(value_expr, function, &elem_ty)?;
+        self.builder.build_store(elem_ptr, val);
+
+        // len++
+        let len_next = self.builder.build_int_add(len, self.context.i32_type().const_int(1, false), "len_next");
+        // need current base again (may have been updated)
+        let cur_base2 = match list_expr { Expr::Identifier(name) => { let (ptr, _) = self.named_values.get(name).ok_or("Unknown variable")?; self.builder.build_load(*ptr, name).into_pointer_value() } _ => cur_base };
+        let len_ptr2_i8 = unsafe { self.builder.build_gep(cur_base2, &[self.context.i32_type().const_int(0, false)], "len_ptr2_i8") };
+        let len_ptr2 = self.builder.build_bitcast(len_ptr2_i8, self.context.i32_type().ptr_type(inkwell::AddressSpace::default()), "len_ptr2").into_pointer_value();
+        self.builder.build_store(len_ptr2, len_next);
+        Ok(len_next)
+    }
+
+    // Builtin: list_pop(list) -> returns last element as int-repr, reduces len
+    fn gen_builtin_list_pop(&mut self, list_expr: &Expr, function: inkwell::values::FunctionValue<'ctx>) -> Result<inkwell::values::IntValue<'ctx>, String> {
+        let (base_i8, elem_ty) = match list_expr {
+            Expr::Identifier(name) => {
+                if let Some((var_ptr, var_ty)) = self.named_values.get(name) {
+                    if let Type::List(elem) = var_ty { (self.builder.build_load(*var_ptr, name).into_pointer_value(), (*elem).clone()) } else { return Err("list_pop expects a list".to_string()); }
+                } else { return Err("Unknown variable".to_string()); }
+            }
+            _ => return Err("list_pop currently supports identifiers only".to_string()),
+        };
+        let llvm_elem_ty = self.get_llvm_type(&elem_ty)?;
+        // len
+        let len_ptr_i8 = unsafe { self.builder.build_gep(base_i8, &[self.context.i32_type().const_int(0, false)], "len_ptr_i8") };
+        let len_ptr = self.builder.build_bitcast(len_ptr_i8, self.context.i32_type().ptr_type(inkwell::AddressSpace::default()), "len_ptr").into_pointer_value();
+        let len = self.builder.build_load(len_ptr, "len").into_int_value();
+        // if len == 0 => jump to exit with result 0; else compute and then jump to exit
+        let zero = self.context.i32_type().const_int(0, false);
+        let is_empty = self.builder.build_int_compare(inkwell::IntPredicate::EQ, len, zero, "is_empty");
+        let parent = function;
+        let empty_bb = self.context.append_basic_block(parent, "pop_empty");
+        let cont_bb = self.context.append_basic_block(parent, "pop_cont");
+        let exit_bb = self.context.append_basic_block(parent, "pop_exit");
+        let result_alloca = self.build_entry_alloca(function, self.context.i32_type().into(), "pop_res");
+        self.builder.build_store(result_alloca, zero);
+        self.builder.build_conditional_branch(is_empty, empty_bb, cont_bb);
+
+        // empty path: keep 0 and jump to exit
+        self.builder.position_at_end(empty_bb);
+        self.builder.build_unconditional_branch(exit_bb);
+
+        // non-empty path
+        self.builder.position_at_end(cont_bb);
+        let new_len = self.builder.build_int_sub(len, self.context.i32_type().const_int(1, false), "new_len");
+        let data_off = self.context.i32_type().const_int(8, false);
+        let data_ptr_i8 = unsafe { self.builder.build_gep(base_i8, &[data_off], "data_ptr_i8") };
+        let data_ptr = self.builder.build_bitcast(data_ptr_i8, llvm_elem_ty.ptr_type(inkwell::AddressSpace::default()), "data_ptr").into_pointer_value();
+        let elem_ptr = unsafe { self.builder.build_gep(data_ptr, &[new_len], "last_ptr") };
+        let loaded = self.builder.build_load(elem_ptr, "last");
+        // write back new len
+        self.builder.build_store(len_ptr, new_len);
+        // convert to int and store
+        let int_val = match *elem_ty {
+            Type::Float => {
+                let f = loaded.into_float_value();
+                self.builder.build_float_to_signed_int(f, self.context.i32_type(), "f_to_i")
+            }
+            Type::String | Type::List(_) | Type::Dict(_, _) | Type::Custom(_) => {
+                let p = loaded.into_pointer_value();
+                self.builder.build_ptr_to_int(p, self.context.i32_type(), "p_to_i")
+            }
+            Type::Char => {
+                let c8 = loaded.into_int_value();
+                self.builder.build_int_z_extend(c8, self.context.i32_type(), "c_to_i")
+            }
+            _ => loaded.into_int_value(),
+        };
+        self.builder.build_store(result_alloca, int_val);
+        self.builder.build_unconditional_branch(exit_bb);
+
+        // exit: load result and return
+        self.builder.position_at_end(exit_bb);
+        let ret = self.builder.build_load(result_alloca, "ret").into_int_value();
+        Ok(ret)
     }
 
     // Builtin: list_set(list, index, value)
@@ -1949,22 +2451,28 @@ impl<'ctx> CodeGenerator<'ctx> {
         // Branch based on condition
         self.builder.build_conditional_branch(cond_bool, then_block, else_block);
 
-        // Generate then block
+        // Generate then block with its own local scope
         self.builder.position_at_end(then_block);
+        let saved_then = self.named_values.clone();
         for stmt in &if_stmt.then_branch {
             self.gen_stmt(stmt, function)?;
         }
+        // Restore then scope
+        self.named_values = saved_then;
         if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
             self.builder.build_unconditional_branch(merge_block);
         }
 
-        // Generate else block
+        // Generate else block with its own local scope
         self.builder.position_at_end(else_block);
+        let saved_else = self.named_values.clone();
         if let Some(else_branch) = &if_stmt.else_branch {
             for stmt in else_branch {
                 self.gen_stmt(stmt, function)?;
             }
         }
+        // Restore else scope
+        self.named_values = saved_else;
         if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
             self.builder.build_unconditional_branch(merge_block);
         }
@@ -1994,11 +2502,13 @@ impl<'ctx> CodeGenerator<'ctx> {
         );
         self.builder.build_conditional_branch(cond_bool, loop_body, loop_exit);
 
-        // Generate loop body
+        // Generate loop body with its own local scope per iteration
         self.builder.position_at_end(loop_body);
+        let saved_body = self.named_values.clone();
         for stmt in &while_stmt.body {
             self.gen_stmt(stmt, function)?;
         }
+        self.named_values = saved_body;
         if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
             self.builder.build_unconditional_branch(loop_header);
         }
@@ -2012,7 +2522,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         // Support: for (i in range(start, end[, step])) {...}
         // and sugar: for (i in a..b) {...} (already parsed into range(a,b))
         if let Expr::FunctionCall(fc) = &for_stmt.iterable {
-            if fc.name == "range" && (fc.args.len() == 2 || fc.args.len() == 3) {
+            let call_name = resolve_std_alias(&fc.name).unwrap_or(&fc.name);
+            if call_name == "range" && (fc.args.len() == 2 || fc.args.len() == 3) {
                 // Initialize i = start
                 let start = self.gen_expr(&fc.args[0], function)?;
                 let step = if fc.args.len() == 3 { self.gen_expr(&fc.args[2], function)? } else { self.context.i32_type().const_int(1, false) };
@@ -2035,11 +2546,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let cond = self.builder.build_int_compare(inkwell::IntPredicate::SLT, i_val, end, "i_lt_end");
                 self.builder.build_conditional_branch(cond, body, exit);
 
-                // Body: loop body, then i += step
+                // Body: loop body, then i += step (with per-iteration scope)
                 self.builder.position_at_end(body);
+                let saved = self.named_values.clone();
                 for s in &for_stmt.body {
                     self.gen_stmt(s, function)?;
                 }
+                self.named_values = saved;
                 let i_next = self.builder.build_int_add(i_val, step, "i_next");
                 self.builder.build_store(alloca, i_next);
                 self.builder.build_unconditional_branch(header);
@@ -2049,7 +2562,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 return Ok(());
             }
         }
-        // Iteration over list: for (x in list) {...}
+        // Iteration over list identifier: for (x in list) {...}
         if let Expr::Identifier(name) = &for_stmt.iterable {
             if let Some((list_ptr, list_ty)) = self.named_values.get(name) {
                 if let Type::List(elem_ty_box) = list_ty {
@@ -2085,12 +2598,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                     let cond = self.builder.build_int_compare(inkwell::IntPredicate::SLT, i_val, len, "i_lt_len");
                     self.builder.build_conditional_branch(cond, body, exit);
 
-                    // body: load element to iter var; gen body; i++
+                    // body: load element to iter var; gen body; i++ (with per-iteration scope)
                     self.builder.position_at_end(body);
                     let elem_ptr = unsafe { self.builder.build_gep(data_ptr, &[i_val], "elem_ptr") };
                     let elem = self.builder.build_load(elem_ptr, "elem");
                     self.builder.build_store(iter_alloca, elem);
+                    let saved = self.named_values.clone();
                     for s in &for_stmt.body { self.gen_stmt(s, function)?; }
+                    self.named_values = saved;
                     let next_i = self.builder.build_int_add(i_val, self.context.i32_type().const_int(1, false), "i_next");
                     self.builder.build_store(idx_alloca, next_i);
                     self.builder.build_unconditional_branch(header);
@@ -2101,7 +2616,60 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         }
 
-        Err("Unsupported for-iterable; expected range(start,end[,step]) or list".to_string())
+        // Iteration over any list-producing expression (e.g., array literal)
+        let iter_ty = self.infer_type_from_expr(&for_stmt.iterable);
+        if let Type::List(elem_ty_box) = iter_ty {
+            // Materialize list pointer from expression under typed context
+            let base_bv = self.gen_expr_typed(&for_stmt.iterable, function, &Type::List(elem_ty_box.clone()))?;
+            let base_i8 = match base_bv { inkwell::values::BasicValueEnum::PointerValue(p) => p, _ => return Err("Iterable did not produce list pointer".to_string()) };
+
+            // len at offset 0
+            let len_ptr_i8 = unsafe { self.builder.build_gep(base_i8, &[self.context.i32_type().const_int(0, false)], "len_ptr_i8") };
+            let len_ptr = self.builder.build_bitcast(len_ptr_i8, self.context.i32_type().ptr_type(inkwell::AddressSpace::default()), "len_ptr").into_pointer_value();
+            let len = self.builder.build_load(len_ptr, "len").into_int_value();
+            // data pointer at offset 8
+            let data_off = self.context.i32_type().const_int(8, false);
+            let data_ptr_i8 = unsafe { self.builder.build_gep(base_i8, &[data_off], "data_ptr_i8") };
+            let llvm_elem_ty = self.get_llvm_type(&*elem_ty_box)?;
+            let data_ptr = self.builder.build_bitcast(data_ptr_i8, llvm_elem_ty.ptr_type(inkwell::AddressSpace::default()), "data_ptr").into_pointer_value();
+
+            // allocate loop index and loop variable
+            let idx_alloca = self.build_entry_alloca(function, self.context.i32_type().into(), "i");
+            self.builder.build_store(idx_alloca, self.context.i32_type().const_int(0, false));
+
+            let iter_alloca = self.build_entry_alloca(function, llvm_elem_ty, &for_stmt.variable);
+            let iter_type: Type = elem_ty_box.as_ref().clone();
+            self.named_values.insert(for_stmt.variable.clone(), (iter_alloca, iter_type));
+
+            // blocks
+            let header = self.context.append_basic_block(function, "for_expr_list_header");
+            let body = self.context.append_basic_block(function, "for_expr_list_body");
+            let exit = self.context.append_basic_block(function, "for_expr_list_exit");
+            self.builder.build_unconditional_branch(header);
+
+            // header: i < len
+            self.builder.position_at_end(header);
+            let i_val = self.builder.build_load(idx_alloca, "i").into_int_value();
+            let cond = self.builder.build_int_compare(inkwell::IntPredicate::SLT, i_val, len, "i_lt_len");
+            self.builder.build_conditional_branch(cond, body, exit);
+
+            // body: load element to iter var; gen body; i++ (with per-iteration scope)
+            self.builder.position_at_end(body);
+            let elem_ptr = unsafe { self.builder.build_gep(data_ptr, &[i_val], "elem_ptr") };
+            let elem = self.builder.build_load(elem_ptr, "elem");
+            self.builder.build_store(iter_alloca, elem);
+            let saved = self.named_values.clone();
+            for s in &for_stmt.body { self.gen_stmt(s, function)?; }
+            self.named_values = saved;
+            let next_i = self.builder.build_int_add(i_val, self.context.i32_type().const_int(1, false), "i_next");
+            self.builder.build_store(idx_alloca, next_i);
+            self.builder.build_unconditional_branch(header);
+
+            self.builder.position_at_end(exit);
+            return Ok(());
+        }
+
+        Err("Unsupported for-iterable; expected range(start,end[,step]) or list expression".to_string())
     }
 
     fn get_llvm_type(&self, nerv_type: &Type) -> Result<inkwell::types::BasicTypeEnum<'ctx>, String> {
@@ -2187,6 +2755,42 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     fn gen_expr_typed(&mut self, expr: &Expr, function: inkwell::values::FunctionValue<'ctx>, target_type: &Type) -> Result<BasicValueEnum<'ctx>, String> {
+        // Special-case: when assigning to String, support string concatenation
+        if let Type::String = target_type {
+            if let Expr::Binary(bin) = expr {
+                if matches!(bin.op, BinaryOp::Add) {
+                    // Evaluate both sides as strings and concatenate using strlen/memcpy
+                    let l_ptr = self.gen_expr_typed(&bin.left, function, &Type::String)?.into_pointer_value();
+                    let r_ptr = self.gen_expr_typed(&bin.right, function, &Type::String)?.into_pointer_value();
+                    let strlen_fn = self.external_functions.get_function_by_name("strlen").ok_or("strlen not declared")?;
+                    let memcpy_fn = self.external_functions.get_function_by_name("memcpy").ok_or("memcpy not declared")?;
+                    let len_l_call = self.builder.build_call(strlen_fn, &[l_ptr.into()], "strlen_l");
+                    let len_l64 = len_l_call.try_as_basic_value().left().unwrap().into_int_value();
+                    let len_r_call = self.builder.build_call(strlen_fn, &[r_ptr.into()], "strlen_r");
+                    let len_r64 = len_r_call.try_as_basic_value().left().unwrap().into_int_value();
+                    let total64 = self.builder.build_int_add(len_l64, len_r64, "sum64");
+                    let one64 = self.context.i64_type().const_int(1, false);
+                    let total1_64 = self.builder.build_int_add(total64, one64, "sum1_64");
+                    let total1_32 = self.builder.build_int_cast(total1_64, self.context.i32_type(), "sum1_32");
+                    let call = self.builder.build_call(self.external_functions.malloc, &[total1_32.into()], "malloc_concat_typed");
+                    let dst = call.try_as_basic_value().left().unwrap().into_pointer_value();
+                    if let Some(track_fn) = self.external_functions.get_function_by_name("nerv_track_alloc") { self.builder.build_call(track_fn, &[dst.into()], "track"); }
+                    // memcpy dst, l_ptr, len_l
+                    self.builder.build_call(memcpy_fn, &[dst.into(), l_ptr.into(), len_l64.into()], "cpy_l");
+                    // memcpy dst+len_l, r_ptr, len_r
+                    let len_l32 = self.builder.build_int_cast(len_l64, self.context.i32_type(), "len_l32");
+                    let dst_off = unsafe { self.builder.build_gep(dst, &[len_l32], "dst_off") };
+                    self.builder.build_call(memcpy_fn, &[dst_off.into(), r_ptr.into(), len_r64.into()], "cpy_r");
+                    // null terminate
+                    let total_i32 = self.builder.build_int_cast(total64, self.context.i32_type(), "total_i32");
+                    let endp = unsafe { self.builder.build_gep(dst, &[total_i32], "endp") };
+                    let zero8 = self.context.i8_type().const_int(0, false);
+                    self.builder.build_store(endp, zero8);
+                    return Ok(dst.into());
+                }
+            }
+        }
+
         match expr {
             Expr::Binary(bin) => {
                 // Support [x] * N when assigned to list<T>
@@ -2545,6 +3149,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(())
     }
 
+    #[allow(dead_code)]
     fn gen_class_methods(&mut self, class_decl: &ClassDeclStmt) -> Result<(), String> {
         for method in &class_decl.methods {
             if method.name == class_decl.name {
@@ -2558,6 +3163,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(())
     }
 
+    #[allow(dead_code)]
     fn gen_constructor_body(&mut self, class_name: &str, method: &FunctionDeclStmt) -> Result<(), String> {
         let function = *self.user_functions.get(&format!("{}_new", class_name)).unwrap();
         let basic_block = self.context.append_basic_block(function, "entry");
@@ -2615,6 +3221,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(())
     }
 
+    #[allow(dead_code)]
     fn gen_method_body(&mut self, class_name: &str, method: &FunctionDeclStmt) -> Result<(), String> {
         let function = *self.user_functions.get(&format!("{}_{}", class_name, method.name)).unwrap();
         let basic_block = self.context.append_basic_block(function, "entry");

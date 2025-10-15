@@ -15,6 +15,7 @@ mod stdlib;
 mod module_resolver;
 mod diagnostics;
 mod runtime;
+mod typecheck;
 
 use parser::Parser;
 use codegen::CodeGenerator;
@@ -128,10 +129,25 @@ fn compile_and_run(source: &Source) -> Result<(), ()> {
         }
     };
 
+    // Minimal static type checking pass before codegen
+    if let Err(e) = typecheck::check_program(&program) {
+        let src = diagnostics::SourceFile { name: &source.name, src: &source.input };
+        let msg = diagnostics::render_error(&format!("Type error: {}", e), &src, None);
+        eprintln!("{}", msg);
+        return Err(());
+    }
+
     let context = Context::create();
     let mut codegen = CodeGenerator::new(&context);
+    let dump_ir = std::env::var("NERV_DUMP_IR").ok().map(|v| v == "1").unwrap_or(false);
     match codegen.run(&program) {
-        Ok(_) => Ok(()),
+        Ok(_) => {
+            if dump_ir {
+                let ir = codegen.dump_ir_to_string();
+                eprintln!("=== LLVM IR ===\n{}", ir);
+            }
+            Ok(())
+        },
         Err(e) => { eprintln!("Error during execution: {}", e); Err(()) }
     }
 }
