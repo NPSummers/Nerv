@@ -3,7 +3,7 @@ import nerv::std;
 plug main(): int {
     # Arrays/lists
     plug a: list<int> = [1, 2, 3];
-    # (FAIL)
+    # (PASS)
     print(len(a));          # 3
     list_push(a, 4);
     print(list_get(a, 0));  # 1
@@ -37,11 +37,11 @@ plug main(): int {
     plug s: string = "hi";
     print(len(s));
 
-    # String '+' concat and comparisons (FAIL)
+    # String '+' concat and comparisons (PASS)
     plug s2: string = " there";
     plug s3: string = s + s2;
     print(s3);
-    # equality will compare pointer identity for now
+    # equality uses string compare
     print((s3 == s));
 
     # Booleans print as true/false (PASS)
@@ -69,7 +69,7 @@ plug main(): int {
     plug f: float = 1 + 2.5; # ok
     # plug bad: float = "x";   # error
 
-    # Memory tracker cleanup at end (FAILS)
+    # Memory tracker cleanup at end (PASS)
     nerv::std::cleanup_allocs(); 
     return 0;
 }

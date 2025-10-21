@@ -1,1 +1,1 @@
-cloc --exclude-dir=target .
+cloc --exclude-dir=target ./src ./examples
