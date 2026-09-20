@@ -20,7 +20,7 @@ A basic showcase is in the [**Showcase**](./examples/showcase.nerv) file.
 
 ## Contributing
 
-Contributions are welcome, but please make sure you clarify with me before submitting a pull request. You can contact me via my discord `_nonnewport_`.
+Contributions are welcome, but please make sure you clarify with me before submitting a pull request. You can contact me via my discord `non.menthol.newports`.
 
 ## License
 
